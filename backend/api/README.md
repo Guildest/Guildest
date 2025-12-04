@@ -1,0 +1,11 @@
+# HTTP API (FastAPI)
+- Discord OAuth onboarding and bot management endpoints.
+- Stripe webhooks for subscriptions.
+- Analytics and settings retrieval/update.
+- Keep separate from the gateway for resilience.
+- Example endpoints:
+  - POST /webhooks/discord
+  - POST /subscriptions/stripe
+  - GET /guilds/{id}/analytics
+  - GET /guilds/{id}/settings
+  - PATCH /guilds/{id}/settings
