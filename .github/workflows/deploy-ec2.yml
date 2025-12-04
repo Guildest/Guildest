@@ -1,0 +1,108 @@
+name: Deploy to EC2
+
+on:
+  push:
+    branches: [ "main" ]
+    paths-ignore:
+      - "**.md"
+      - ".gitignore"
+      - "LICENSE"
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-ec2
+  cancel-in-progress: false
+
+env:
+  DEPLOY_PATH: /home/ubuntu/guildest
+  APP_NAME: guildest
+  SMOKE_TEST_CMD: python -m compileall backend
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Copy repo to EC2 (arm/t4g)
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          source: "."
+          target: ${{ env.DEPLOY_PATH }}
+          rm: false
+          strip_components: 0
+          recursive: true
+          timeout: 120s
+
+      - name: Build, smoke-test, and restart container on EC2
+        id: deploy_step
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          command_timeout: 12m
+          script: |
+            set -euxo pipefail
+
+            cd "${{ env.DEPLOY_PATH }}"
+
+            # Write .env from GitHub Secrets (add/remove as needed)
+            cat > .env <<'EOF'
+            # Example envs; replace with your real keys in repo settings
+            API_BASE=${{ secrets.API_BASE }}
+            DISCORD_TOKEN=${{ secrets.DISCORD_TOKEN }}
+            DATABASE_URL=${{ secrets.DATABASE_URL }}
+            REDIS_URL=${{ secrets.REDIS_URL }}
+            EOF
+
+            mkdir -p "${{ env.DEPLOY_PATH }}/data"
+
+            echo "Building Docker image on arm64 host..."
+            sudo DOCKER_BUILDKIT=1 docker build \
+              --build-arg BUILDKIT_INLINE_CACHE=1 \
+              -t "${{ env.APP_NAME }}:${{ github.sha }}" \
+              .
+
+            echo "Running smoke test: '${{ env.SMOKE_TEST_CMD }}'"
+            if ! sudo docker run --rm --entrypoint "" \
+              "${{ env.APP_NAME }}:${{ github.sha }}" \
+              sh -c "${{ env.SMOKE_TEST_CMD }}"; then
+              echo "Smoke test failed; aborting deploy."
+              exit 1
+            fi
+
+            echo "Smoke test passed; rolling out new container..."
+            sudo docker tag "${{ env.APP_NAME }}:${{ github.sha }}" "${{ env.APP_NAME }}:latest"
+
+            sudo docker stop "${{ env.APP_NAME }}" 2>/dev/null || true
+            sudo docker rm "${{ env.APP_NAME }}" 2>/dev/null || true
+
+            sudo docker run -d \
+              --name "${{ env.APP_NAME }}" \
+              --restart unless-stopped \
+              --env-file .env \
+              --memory=512m \
+              --log-opt max-size=10m \
+              --log-opt max-file=3 \
+              -v "${{ env.DEPLOY_PATH }}/data:/app/data" \
+              "${{ env.APP_NAME }}:latest"
+
+            echo "Performing post-start health check..."
+            sleep 5
+            if ! sudo docker ps --filter "name=${{ env.APP_NAME }}" --filter "status=running" --format '{{.Names}}' | grep -q "${{ env.APP_NAME }}"; then
+              echo "Container is not running; dumping logs."
+              sudo docker logs "${{ env.APP_NAME }}" --tail 80 || true
+              exit 1
+            fi
+
+            echo "Cleaning dangling images..."
+            sudo docker image prune -f
+
+            echo "Deploy completed."
