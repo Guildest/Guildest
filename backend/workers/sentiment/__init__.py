@@ -1,0 +1,1 @@
+# Sentiment worker package marker.

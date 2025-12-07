@@ -1,0 +1,119 @@
+version: "3.9"
+
+services:
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "backend.api.main"]
+    environment:
+      LOG_LEVEL: INFO
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/postgres
+      REDIS_URL: redis://redis:6379/0
+      QUEUE_STREAM: guildest:events
+      QUEUE_MAX_LENGTH: 5000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "backend.discord_gateway.main"]
+    environment:
+      LOG_LEVEL: INFO
+      DISCORD_TOKEN: ${DISCORD_TOKEN:?set Discord bot token}
+      REDIS_URL: redis://redis:6379/0
+      QUEUE_STREAM: guildest:events
+      QUEUE_MAX_LENGTH: 5000
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  worker-analytics:
+    build:
+      context: .
+    command: ["python", "-m", "backend.workers.analytics.main"]
+    environment:
+      LOG_LEVEL: INFO
+      REDIS_URL: redis://redis:6379/0
+      QUEUE_STREAM: guildest:events
+      QUEUE_MAX_LENGTH: 5000
+      QUEUE_GROUP: guildest-workers
+      QUEUE_CONSUMER: analytics-1
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/postgres
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker-moderation:
+    build:
+      context: .
+    command: ["python", "-m", "backend.workers.moderation.main"]
+    environment:
+      LOG_LEVEL: INFO
+      REDIS_URL: redis://redis:6379/0
+      QUEUE_STREAM: guildest:events
+      QUEUE_MAX_LENGTH: 5000
+      QUEUE_GROUP: guildest-workers
+      QUEUE_CONSUMER: moderation-1
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/postgres
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker-sentiment:
+    build:
+      context: .
+    command: ["python", "-m", "backend.workers.sentiment.main"]
+    environment:
+      LOG_LEVEL: INFO
+      REDIS_URL: redis://redis:6379/0
+      QUEUE_STREAM: guildest:events
+      QUEUE_MAX_LENGTH: 5000
+      QUEUE_GROUP: guildest-workers
+      QUEUE_CONSUMER: sentiment-1
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/postgres
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  pgdata:

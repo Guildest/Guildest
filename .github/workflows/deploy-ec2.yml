@@ -17,6 +17,7 @@ env:
   DEPLOY_PATH: /home/ubuntu/guildest
   APP_NAME: guildest
   SMOKE_TEST_CMD: python -m compileall backend
+  DOCKERFILE_PATH: Dockerfile
 
 jobs:
   deploy:
@@ -60,12 +61,16 @@ jobs:
             DISCORD_TOKEN=${{ secrets.DISCORD_TOKEN }}
             DATABASE_URL=${{ secrets.DATABASE_URL }}
             REDIS_URL=${{ secrets.REDIS_URL }}
+            QUEUE_STREAM=${{ secrets.QUEUE_STREAM || 'guildest:events' }}
+            QUEUE_MAX_LENGTH=${{ secrets.QUEUE_MAX_LENGTH || '5000' }}
+            LOG_LEVEL=${{ secrets.LOG_LEVEL || 'INFO' }}
             EOF
 
             mkdir -p "${{ env.DEPLOY_PATH }}/data"
 
-            echo "Building Docker image on arm64 host..."
+            echo "Building Docker image on arm64 host (Dockerfile: ${DOCKERFILE_PATH})..."
             sudo DOCKER_BUILDKIT=1 docker build \
+              -f "${DOCKERFILE_PATH}" \
               --build-arg BUILDKIT_INLINE_CACHE=1 \
               -t "${{ env.APP_NAME }}:${{ github.sha }}" \
               .

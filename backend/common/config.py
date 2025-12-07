@@ -1,0 +1,63 @@
+import os
+from dataclasses import dataclass
+from typing import Optional
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        raise ValueError(f"{name} must be an integer, got '{raw}'") from None
+
+
+@dataclass
+class RedisConfig:
+    url: str = "redis://localhost:6379/0"
+
+
+@dataclass
+class QueueConfig:
+    stream: str = "guildest:events"
+    max_length: int = 5000
+    group_name: str = "guildest-workers"
+    consumer_name: str = "worker-1"
+
+
+@dataclass
+class AppConfig:
+    """Shared application configuration loaded from environment."""
+
+    log_level: str = "INFO"
+    api_base: Optional[str] = None
+    database_url: Optional[str] = None
+    discord_token: Optional[str] = None
+    redis: RedisConfig = RedisConfig()
+    queue: QueueConfig = QueueConfig()
+
+
+def load_app_config() -> AppConfig:
+    """Load configuration from environment variables."""
+
+    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0").strip()
+    queue_stream = os.getenv("QUEUE_STREAM", "guildest:events").strip()
+    queue_max = _env_int("QUEUE_MAX_LENGTH", 5000)
+
+    group_name = os.getenv("QUEUE_GROUP", "guildest-workers").strip()
+    consumer_name = os.getenv("QUEUE_CONSUMER", "worker-1").strip()
+
+    return AppConfig(
+        log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper(),
+        api_base=os.getenv("API_BASE"),
+        database_url=os.getenv("DATABASE_URL"),
+        discord_token=os.getenv("DISCORD_TOKEN"),
+        redis=RedisConfig(url=redis_url),
+        queue=QueueConfig(
+            stream=queue_stream,
+            max_length=queue_max,
+            group_name=group_name,
+            consumer_name=consumer_name,
+        ),
+    )
