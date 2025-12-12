@@ -1,2 +1,2 @@
-hikari==2.0.0.dev118
+hikari==2.4.1
 redis>=5.0.1

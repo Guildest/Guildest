@@ -1,0 +1,100 @@
+version: "3.9"
+
+# Production compose template:
+# - Uses externally-managed Postgres/Redis (set env vars).
+# - Runs API + gateway + workers (including commands).
+#
+# Build ARM64 images in CI and set `image:` tags here (recommended).
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "backend.api.main"]
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL}
+      REDIS_URL: ${REDIS_URL:?set REDIS_URL}
+      QUEUE_STREAM: ${QUEUE_STREAM:-guildest:events}
+      QUEUE_MAX_LENGTH: ${QUEUE_MAX_LENGTH:-5000}
+      SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET}
+      FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:?set FRONTEND_BASE_URL}
+      DISCORD_CLIENT_ID: ${DISCORD_CLIENT_ID:?set DISCORD_CLIENT_ID}
+      DISCORD_CLIENT_SECRET: ${DISCORD_CLIENT_SECRET:?set DISCORD_CLIENT_SECRET}
+      DISCORD_OAUTH_REDIRECT_URI: ${DISCORD_OAUTH_REDIRECT_URI:?set DISCORD_OAUTH_REDIRECT_URI}
+    ports:
+      - "8000:8000"
+
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "backend.discord_gateway.main"]
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DISCORD_TOKEN: ${DISCORD_TOKEN:?set DISCORD_TOKEN}
+      DISCORD_APPLICATION_ID: ${DISCORD_APPLICATION_ID:-}
+      DISCORD_COMMANDS_GUILD_ID: ${DISCORD_COMMANDS_GUILD_ID:-}
+      FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:?set FRONTEND_BASE_URL}
+      REDIS_URL: ${REDIS_URL:?set REDIS_URL}
+      QUEUE_STREAM: ${QUEUE_STREAM:-guildest:events}
+      QUEUE_MAX_LENGTH: ${QUEUE_MAX_LENGTH:-5000}
+      # Optional: enables DB-backed slash commands (/stats, /sentiment, /modlogs)
+      DATABASE_URL: ${DATABASE_URL:-}
+
+  worker-analytics:
+    build:
+      context: .
+    command: ["python", "-m", "backend.workers.analytics.main"]
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      REDIS_URL: ${REDIS_URL:?set REDIS_URL}
+      QUEUE_STREAM: ${QUEUE_STREAM:-guildest:events}
+      QUEUE_MAX_LENGTH: ${QUEUE_MAX_LENGTH:-5000}
+      QUEUE_GROUP: ${QUEUE_GROUP:-guildest-workers}
+      QUEUE_CONSUMER: ${QUEUE_CONSUMER_ANALYTICS:-analytics-1}
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL}
+
+  worker-moderation:
+    build:
+      context: .
+    command: ["python", "-m", "backend.workers.moderation.main"]
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      REDIS_URL: ${REDIS_URL:?set REDIS_URL}
+      QUEUE_STREAM: ${QUEUE_STREAM:-guildest:events}
+      QUEUE_MAX_LENGTH: ${QUEUE_MAX_LENGTH:-5000}
+      QUEUE_GROUP: ${QUEUE_GROUP:-guildest-workers}
+      QUEUE_CONSUMER: ${QUEUE_CONSUMER_MODERATION:-moderation-1}
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL}
+
+  worker-sentiment:
+    build:
+      context: .
+    command: ["python", "-m", "backend.workers.sentiment.main"]
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      REDIS_URL: ${REDIS_URL:?set REDIS_URL}
+      QUEUE_STREAM: ${QUEUE_STREAM:-guildest:events}
+      QUEUE_MAX_LENGTH: ${QUEUE_MAX_LENGTH:-5000}
+      QUEUE_GROUP: ${QUEUE_GROUP:-guildest-workers}
+      QUEUE_CONSUMER: ${QUEUE_CONSUMER_SENTIMENT:-sentiment-1}
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-deepseek/deepseek-v3.2}
+
+  worker-commands:
+    build:
+      context: .
+    command: ["python", "-m", "backend.workers.commands.main"]
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DISCORD_TOKEN: ${DISCORD_TOKEN:?set DISCORD_TOKEN}
+      FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:?set FRONTEND_BASE_URL}
+      REDIS_URL: ${REDIS_URL:?set REDIS_URL}
+      QUEUE_STREAM: ${QUEUE_STREAM:-guildest:events}
+      QUEUE_MAX_LENGTH: ${QUEUE_MAX_LENGTH:-5000}
+      QUEUE_GROUP: ${QUEUE_GROUP:-guildest-workers}
+      QUEUE_CONSUMER: ${QUEUE_CONSUMER_COMMANDS:-commands-1}
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL}

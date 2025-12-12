@@ -1,8 +1,9 @@
 fastapi==0.110.0
 uvicorn[standard]==0.30.0
 redis>=5.0.1
-hikari==2.0.0.dev118
+hikari==2.4.1
 pydantic>=2.6,<3
 psycopg[binary,pool]>=3.2.1,<3.3
+httpx>=0.27,<1
 pytest>=8.2
 pytest-asyncio>=0.23

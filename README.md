@@ -12,3 +12,36 @@ Monorepo for the Guildest Discord bot and supporting web services.
 - API: FastAPI
 - DB: Postgres (Neon/Supabase/RDS)
 - Frontend: Next.js
+
+## Running locally (Docker Compose)
+
+Required env vars:
+- `DISCORD_TOKEN` (bot token)
+- `DISCORD_APPLICATION_ID` (required for slash commands registration)
+- `SESSION_SECRET` (any long random string)
+- Discord OAuth (for dashboard login):
+  - `DISCORD_CLIENT_ID`
+  - `DISCORD_CLIENT_SECRET`
+  - `DISCORD_OAUTH_REDIRECT_URI` (e.g. `http://localhost:8000/auth/discord/callback`)
+- `FRONTEND_BASE_URL` (e.g. `http://localhost:3000`)
+
+Start backend services:
+
+```bash
+docker compose up --build
+```
+
+Start frontend:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+## Deployment notes (ARM64 / t4g.nano)
+
+- `python:3.11-slim`, `redis:7`, and `postgres:16` are multi-arch and work on `linux/arm64`.
+- A `t4g.nano` is extremely resource constrained; running Postgres + Redis + API + gateway + multiple workers + Next.js on the same box will likely OOM.
+  - Recommended: use managed Postgres + managed Redis, and run only the app containers on the instance.
+  - Recommended: build images in CI on an ARM64 runner (or `buildx --platform linux/arm64`) and deploy prebuilt images (avoid compiling on the nano).

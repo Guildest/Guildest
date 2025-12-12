@@ -1,15 +1,15 @@
 # Moderation Worker
 
-Consumes queue events and evaluates content safety.
+Consumes queue events and evaluates messages for moderation signals.
 
-## Current mode
-- Read from Redis Streams, call LLM safety (e.g., Groq Llama Guard 4) if available.
-- Log outcomes and write to Postgres `moderation_logs` when `DATABASE_URL` is set.
+## Current behavior
 
-## Target behavior
-- Store moderation decisions in `moderation_logs`.
-- Emit alerts to guild mod-log channels.
+- Runs lightweight heuristic checks (mass mentions, invite links, link spam).
+- Always “decides” an action (e.g. `reviewed`, `flagged`).
+- **Pro-only persistence:** writes to Postgres `moderation_logs` only when the guild is connected to a `pro` subscriber (per-guild audit history).
 
 ## Notes
-- Avoid storing full message content unless required for audit.
-- Keep latency low; consider short timeouts on external calls.
+
+- Keeps DB writes low for free users (no audit trail stored).
+- Can be extended to dispatch alerts to a configured mod-log channel.
+

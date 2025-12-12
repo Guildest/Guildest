@@ -1,11 +1,22 @@
 import asyncio
 import logging
-from typing import Any, Dict
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, Optional
 
 import hikari
 
 from .config import GatewayConfig
+from .app_commands import build_application_commands, register_application_commands
 from .publisher import QueuePublisher
+from backend.database.db import (
+    Database,
+    create_pool,
+    fetch_guild_plan,
+    fetch_latest_sentiment,
+    fetch_message_count_sum,
+    fetch_moderation_logs,
+    init_db,
+)
 
 
 async def build_bot(config: GatewayConfig) -> hikari.GatewayBot:
@@ -20,14 +31,38 @@ async def build_bot(config: GatewayConfig) -> hikari.GatewayBot:
         max_length=config.queue_max_length,
     )
 
+    db: Optional[Database] = None
+    if config.database_url:
+        db = await create_pool(config.database_url)
+        await init_db(db)
+        logging.info("Discord gateway connected to database for slash commands")
+        bot.d["db"] = db
+
     @bot.listen(hikari.StartingEvent)
     async def on_starting(_: hikari.StartingEvent) -> None:
         logging.info("Discord gateway starting up")
+        if config.discord_application_id:
+            try:
+                commands = build_application_commands()
+                result = await register_application_commands(
+                    bot_token=config.discord_token,
+                    application_id=config.discord_application_id,
+                    commands=commands,
+                    guild_id=config.commands_guild_id,
+                )
+                logging.info("Registered %s app commands (%s)", result.count, result.scope)
+            except Exception as exc:  # noqa: BLE001
+                logging.exception("Failed to register application commands: %s", exc)
+        else:
+            logging.info("DISCORD_APPLICATION_ID not set; skipping slash command registration")
 
     @bot.listen(hikari.StoppingEvent)
     async def on_stopping(_: hikari.StoppingEvent) -> None:
         logging.info("Discord gateway shutting down; closing Redis connection")
         await publisher.close()
+        if db:
+            await db.close()
+            logging.info("Discord gateway database connection closed")
 
     @bot.listen(hikari.GuildMessageCreateEvent)
     async def on_message(event: hikari.GuildMessageCreateEvent) -> None:
@@ -55,6 +90,96 @@ async def build_bot(config: GatewayConfig) -> hikari.GatewayBot:
             logging.debug("Enqueued message %s to %s (%s)", event.message_id, config.queue_stream, entry_id)
         except Exception as exc:  # noqa: BLE001
             logging.exception("Failed to publish message %s: %s", event.message_id, exc)
+
+    @bot.listen(hikari.InteractionCreateEvent)
+    async def on_interaction(event: hikari.InteractionCreateEvent) -> None:
+        interaction = event.interaction
+        if not isinstance(interaction, hikari.CommandInteraction):
+            return
+
+        name = interaction.command_name
+        logging.info("Slash command %s guild=%s", name, getattr(interaction, "guild_id", None))
+
+        async def respond(text: str) -> None:
+            await interaction.create_initial_response(
+                hikari.ResponseType.MESSAGE_CREATE,
+                text,
+                flags=hikari.MessageFlag.EPHEMERAL,
+            )
+
+        if name == "ping":
+            await respond("Pong.")
+            return
+
+        if name == "help":
+            await respond(
+                "\n".join(
+                    [
+                        "Commands:",
+                        "/ping",
+                        "/help",
+                        "/dashboard",
+                        "/stats",
+                        "/sentiment",
+                        "/modlogs (Pro)",
+                    ]
+                )
+            )
+            return
+
+        if name == "dashboard":
+            base = (config.frontend_base_url or "http://localhost:3000").rstrip("/")
+            await respond(f"Dashboard: {base}")
+            return
+
+        guild_id = str(getattr(interaction, "guild_id", "") or "")
+        if guild_id == "":
+            await respond("This command can only be used in a server.")
+            return
+
+        db2: Optional[Database] = bot.d.get("db") if hasattr(bot, "d") else None
+        if not db2:
+            await respond("Database not configured for this bot; set DATABASE_URL for DB-backed commands.")
+            return
+
+        if name == "stats":
+            now = datetime.now(timezone.utc)
+            last_hour = await fetch_message_count_sum(db2, guild_id, now - timedelta(hours=1), now)
+            last_day = await fetch_message_count_sum(db2, guild_id, now - timedelta(hours=24), now)
+            await respond(f"Message stats:\n- last hour: {last_hour}\n- last 24h: {last_day}")
+            return
+
+        if name == "sentiment":
+            latest = await fetch_latest_sentiment(db2, guild_id)
+            if not latest:
+                await respond("No sentiment data yet.")
+                return
+            score = latest.get("score")
+            score_str = f"{score:.3f}" if isinstance(score, (int, float)) else "n/a"
+            await respond(f"Latest sentiment ({latest['day']}): {latest['sentiment']} (score {score_str})")
+            return
+
+        if name == "modlogs":
+            plan = await fetch_guild_plan(db2, guild_id)
+            if plan != "pro":
+                await respond("Moderation log history is a Pro feature.")
+                return
+
+            rows = await fetch_moderation_logs(db2, guild_id, limit=5)
+            if not rows:
+                await respond("No moderation events yet.")
+                return
+
+            lines = ["Latest moderation events:"]
+            for row in rows:
+                when = row["created_at"]
+                action = row.get("action") or "event"
+                reason = row.get("reason") or ""
+                lines.append(f"- {when}: {action} {reason}".strip())
+            await respond("\n".join(lines))
+            return
+
+        await respond("Unknown command. Try /help.")
 
     return bot
 

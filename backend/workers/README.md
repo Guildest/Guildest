@@ -13,3 +13,5 @@ tasks (moderation, analytics, sentiment).
 - `QUEUE_STREAM` (default `guildest:events`).
 - `DATABASE_URL` to enable persistence.
 - Optional: `API_BASE` for cross-service calls.
+- Optional (sentiment Pro reports): `OPENROUTER_API_KEY` + `OPENROUTER_MODEL`.
+- Optional (commands): `DISCORD_TOKEN` + `FRONTEND_BASE_URL`.

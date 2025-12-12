@@ -38,6 +38,13 @@ services:
       REDIS_URL: redis://redis:6379/0
       QUEUE_STREAM: guildest:events
       QUEUE_MAX_LENGTH: 5000
+      SESSION_SECRET: ${SESSION_SECRET:-dev-secret-change-me}
+      FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-http://localhost:3000}
+      DISCORD_CLIENT_ID: ${DISCORD_CLIENT_ID:-}
+      DISCORD_CLIENT_SECRET: ${DISCORD_CLIENT_SECRET:-}
+      DISCORD_OAUTH_REDIRECT_URI: ${DISCORD_OAUTH_REDIRECT_URI:-http://localhost:8000/auth/discord/callback}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-deepseek/deepseek-v3.2}
     depends_on:
       postgres:
         condition: service_healthy
@@ -54,9 +61,14 @@ services:
     environment:
       LOG_LEVEL: INFO
       DISCORD_TOKEN: ${DISCORD_TOKEN:?set Discord bot token}
+      DISCORD_APPLICATION_ID: ${DISCORD_APPLICATION_ID:-}
+      DISCORD_COMMANDS_GUILD_ID: ${DISCORD_COMMANDS_GUILD_ID:-}
+      FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-http://localhost:3000}
       REDIS_URL: redis://redis:6379/0
       QUEUE_STREAM: guildest:events
       QUEUE_MAX_LENGTH: 5000
+      # Optional: enables DB-backed slash commands (/stats, /sentiment, /modlogs)
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/postgres
     depends_on:
       redis:
         condition: service_healthy
@@ -108,6 +120,26 @@ services:
       QUEUE_MAX_LENGTH: 5000
       QUEUE_GROUP: guildest-workers
       QUEUE_CONSUMER: sentiment-1
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/postgres
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker-commands:
+    build:
+      context: .
+    command: ["python", "-m", "backend.workers.commands.main"]
+    environment:
+      LOG_LEVEL: INFO
+      DISCORD_TOKEN: ${DISCORD_TOKEN:?set Discord bot token}
+      FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-http://localhost:3000}
+      REDIS_URL: redis://redis:6379/0
+      QUEUE_STREAM: guildest:events
+      QUEUE_MAX_LENGTH: 5000
+      QUEUE_GROUP: guildest-workers
+      QUEUE_CONSUMER: commands-1
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/postgres
     depends_on:
       postgres:

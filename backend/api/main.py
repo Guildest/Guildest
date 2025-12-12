@@ -1,21 +1,63 @@
 import logging
 from contextlib import asynccontextmanager
-from typing import Any, Dict
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, Optional
+from urllib.parse import urlencode
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from starlette.responses import RedirectResponse
 
+from backend.api.auth import (
+    OAUTH_STATE_COOKIE_NAME,
+    SESSION_COOKIE_NAME,
+    make_oauth_state_cookie,
+    make_session_cookie,
+    new_oauth_state,
+    parse_oauth_state_cookie,
+    parse_session_cookie,
+)
+from backend.api.discord_oauth import build_authorize_url, exchange_code_for_token, fetch_me, fetch_my_guilds
 from backend.common.config import load_app_config
 from backend.common.logging import configure_logging
 from backend.common.models import GuildSettings
-from backend.database.db import Database, create_pool, fetch_guild_settings, init_db, upsert_guild_settings
+from backend.database.db import (
+    Database,
+    connect_guild_to_user,
+    create_pool,
+    create_session,
+    delete_session,
+    fetch_user_guild_access,
+    fetch_guild_plan,
+    fetch_guild_settings,
+    fetch_message_counts,
+    fetch_moderation_logs,
+    fetch_sentiment_daily,
+    fetch_sentiment_report,
+    fetch_session_user_id,
+    fetch_subscription_plan,
+    fetch_user_connected_guild_ids,
+    fetch_user_guilds,
+    init_db,
+    set_subscription_plan,
+    upsert_guild_settings,
+    upsert_user,
+    upsert_user_guilds,
+    user_can_access_guild,
+    user_has_manage_guild_permissions,
+ )
 
 
 class WebhookPayload(BaseModel):
     id: str
     type: str
     data: Dict[str, Any] = {}
+
+
+class DevSetPlanBody(BaseModel):
+    plan: str
 
 
 config = load_app_config()
@@ -40,25 +82,301 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="Guildest API", version="0.1.0", lifespan=lifespan)
 
+frontend_origin = (config.frontend_base_url or "http://localhost:3000").rstrip("/")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[frontend_origin],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+def _require_session_secret() -> str:
+    if not config.session_secret:
+        raise HTTPException(status_code=500, detail="SESSION_SECRET is not configured")
+    return config.session_secret
+
+
+async def _require_user_id(request: Request) -> str:
+    secret = _require_session_secret()
+
+    token: Optional[str] = None
+    authz = request.headers.get("authorization")
+    if authz and authz.lower().startswith("bearer "):
+        token = authz.split(" ", 1)[1].strip()
+    if not token:
+        token = request.cookies.get(SESSION_COOKIE_NAME)
+    if not token:
+        raise HTTPException(status_code=401, detail="not authenticated")
+
+    parsed = parse_session_cookie(secret, token)
+    if not parsed:
+        raise HTTPException(status_code=401, detail="invalid session")
+
+    db: Database = request.app.state.db
+    user_id = await fetch_session_user_id(db, parsed.session_id)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="session expired")
+    return user_id
+
+
+async def _require_guild_access(request: Request, guild_id: str) -> str:
+    user_id = await _require_user_id(request)
+    db: Database = request.app.state.db
+    if not await user_can_access_guild(db, user_id, guild_id):
+        raise HTTPException(status_code=403, detail="no access to guild")
+    return user_id
+
+
+async def _require_guild_manage(request: Request, guild_id: str) -> str:
+    user_id = await _require_guild_access(request, guild_id)
+    db: Database = request.app.state.db
+    access = await fetch_user_guild_access(db, user_id, guild_id)
+    if not access or not user_has_manage_guild_permissions(access["is_owner"], access["permissions"]):
+        raise HTTPException(status_code=403, detail="requires Manage Guild permissions")
+    return user_id
+
 
 @app.get("/health")
 async def health() -> Dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/auth/discord/login")
+async def discord_login(request: Request, redirect: str = "/dashboard") -> RedirectResponse:
+    if not (config.discord_client_id and config.discord_oauth_redirect_uri):
+        raise HTTPException(status_code=500, detail="Discord OAuth is not configured")
+
+    if not redirect.startswith("/") or redirect.startswith("//"):
+        redirect = "/dashboard"
+
+    secret = _require_session_secret()
+    state = new_oauth_state()
+    oauth_cookie = make_oauth_state_cookie(secret, state=state, redirect_path=redirect)
+    url = build_authorize_url(config.discord_client_id, config.discord_oauth_redirect_uri, state=state)
+
+    response = RedirectResponse(url=url, status_code=302)
+    response.set_cookie(
+        key=OAUTH_STATE_COOKIE_NAME,
+        value=oauth_cookie,
+        httponly=True,
+        secure=False,
+        samesite="lax",
+        max_age=600,
+    )
+    return response
+
+
+@app.get("/auth/discord/callback")
+async def discord_callback(request: Request, code: str, state: str) -> RedirectResponse:
+    if not (config.discord_client_id and config.discord_client_secret and config.discord_oauth_redirect_uri):
+        raise HTTPException(status_code=500, detail="Discord OAuth is not configured")
+
+    secret = _require_session_secret()
+    state_cookie = request.cookies.get(OAUTH_STATE_COOKIE_NAME)
+    if not state_cookie:
+        raise HTTPException(status_code=400, detail="missing oauth state cookie")
+
+    parsed = parse_oauth_state_cookie(secret, state_cookie)
+    if not parsed:
+        raise HTTPException(status_code=400, detail="invalid oauth state cookie")
+    expected_state, redirect_path = parsed
+    if state != expected_state:
+        raise HTTPException(status_code=400, detail="oauth state mismatch")
+
+    token = await exchange_code_for_token(
+        config.discord_client_id,
+        config.discord_client_secret,
+        config.discord_oauth_redirect_uri,
+        code,
+    )
+    access_token = token.get("access_token")
+    if not isinstance(access_token, str) or access_token.strip() == "":
+        raise HTTPException(status_code=400, detail="missing access_token from discord")
+
+    me = await fetch_me(access_token)
+    guilds = await fetch_my_guilds(access_token)
+
+    user_id = str(me.get("id"))
+    username = me.get("global_name") or me.get("username") or "unknown"
+    avatar = me.get("avatar")
+
+    db: Database = request.app.state.db
+    await upsert_user(db, user_id=user_id, username=str(username), avatar=str(avatar) if avatar else None)
+    await upsert_user_guilds(db, user_id=user_id, guilds=guilds)
+
+    plan = await fetch_subscription_plan(db, user_id)
+    logging.info("Discord login user=%s plan=%s guilds=%s", user_id, plan, len(guilds))
+
+    session_id, _expires_at = await create_session(db, user_id=user_id, ttl_days=7)
+    session_token = make_session_cookie(secret, session_id=session_id, ttl_seconds=7 * 24 * 60 * 60)
+
+    qs = urlencode({"token": session_token, "redirect": redirect_path})
+    response = RedirectResponse(url=f"{frontend_origin}/auth/callback?{qs}", status_code=302)
+    response.delete_cookie(OAUTH_STATE_COOKIE_NAME)
+    return response
+
+
+@app.post("/auth/logout")
+async def logout(request: Request) -> Dict[str, bool]:
+    secret = _require_session_secret()
+
+    token: Optional[str] = None
+    authz = request.headers.get("authorization")
+    if authz and authz.lower().startswith("bearer "):
+        token = authz.split(" ", 1)[1].strip()
+    if not token:
+        token = request.cookies.get(SESSION_COOKIE_NAME)
+
+    if token:
+        parsed = parse_session_cookie(secret, token)
+        if parsed:
+            db: Database = request.app.state.db
+            await delete_session(db, parsed.session_id)
+    return {"ok": True}
+
+
+@app.get("/me")
+async def me(request: Request) -> Dict[str, Any]:
+    user_id = await _require_user_id(request)
+    db: Database = request.app.state.db
+    plan = await fetch_subscription_plan(db, user_id)
+    guilds = await fetch_user_guilds(db, user_id)
+    connected = await fetch_user_connected_guild_ids(db, user_id)
+    return {
+        "user_id": user_id,
+        "plan": plan,
+        "guilds": [{**g, "connected": g["guild_id"] in connected} for g in guilds],
+    }
+
+
+@app.post("/subscriptions/dev/set-plan")
+async def dev_set_plan(request: Request, body: DevSetPlanBody) -> Dict[str, Any]:
+    if not config.dev_admin_token:
+        raise HTTPException(status_code=404, detail="not enabled")
+
+    provided = request.headers.get("x-dev-admin-token")
+    if provided != config.dev_admin_token:
+        raise HTTPException(status_code=403, detail="forbidden")
+
+    user_id = await _require_user_id(request)
+    db: Database = request.app.state.db
+    plan = body.plan.strip().lower()
+    if plan not in {"free", "pro"}:
+        raise HTTPException(status_code=400, detail="plan must be 'free' or 'pro'")
+
+    await set_subscription_plan(db, user_id, plan=plan)
+    return {"ok": True, "user_id": user_id, "plan": plan}
+
+
 @app.get("/guilds/{guild_id}/settings", response_model=GuildSettings)
 async def get_settings(guild_id: str, request: Request) -> GuildSettings:
+    await _require_guild_access(request, guild_id)
     db: Database = request.app.state.db
     return await fetch_guild_settings(db, guild_id)
 
 
 @app.patch("/guilds/{guild_id}/settings", response_model=GuildSettings)
 async def update_settings(guild_id: str, body: GuildSettings, request: Request) -> GuildSettings:
+    await _require_guild_manage(request, guild_id)
     if guild_id != body.guild_id:
         raise HTTPException(status_code=400, detail="guild_id mismatch")
 
     db: Database = request.app.state.db
     return await upsert_guild_settings(db, body)
+
+
+@app.post("/guilds/{guild_id}/connect")
+async def connect_guild(guild_id: str, request: Request) -> Dict[str, bool]:
+    user_id = await _require_guild_manage(request, guild_id)
+    db: Database = request.app.state.db
+    await connect_guild_to_user(db, guild_id=guild_id, billing_user_id=user_id)
+    await fetch_guild_settings(db, guild_id)
+    return {"ok": True}
+
+
+@app.get("/guilds/{guild_id}/dashboard/overview")
+async def dashboard_overview(guild_id: str, request: Request) -> Dict[str, Any]:
+    await _require_guild_access(request, guild_id)
+    db: Database = request.app.state.db
+    plan = await fetch_guild_plan(db, guild_id)
+    return {
+        "guild_id": guild_id,
+        "plan": plan,
+        "features": {
+            "moderation_logs": plan == "pro",
+            "sentiment_reports": plan == "pro",
+            "event_recommendations": plan == "pro",
+            "analytics_extended": plan == "pro",
+        },
+    }
+
+
+@app.get("/guilds/{guild_id}/analytics/message-counts")
+async def analytics_message_counts(guild_id: str, request: Request, hours: int = 24) -> Dict[str, Any]:
+    await _require_guild_access(request, guild_id)
+    db: Database = request.app.state.db
+    settings = await fetch_guild_settings(db, guild_id)
+    if not settings.analytics_enabled:
+        raise HTTPException(status_code=403, detail="analytics disabled for guild")
+    plan = await fetch_guild_plan(db, guild_id)
+
+    hours = max(1, min(hours, 24 * 14 if plan == "pro" else 24 * 7))
+    to_ts = datetime.now(timezone.utc)
+    from_ts = to_ts - timedelta(hours=hours)
+    points = await fetch_message_counts(db, guild_id, from_ts, to_ts, limit=5000 if plan == "pro" else 1500)
+    return {"guild_id": guild_id, "from": from_ts.isoformat(), "to": to_ts.isoformat(), "points": points}
+
+
+@app.get("/guilds/{guild_id}/sentiment/daily")
+async def sentiment_daily(guild_id: str, request: Request, days: int = 30) -> Dict[str, Any]:
+    await _require_guild_access(request, guild_id)
+    db: Database = request.app.state.db
+    settings = await fetch_guild_settings(db, guild_id)
+    if not settings.sentiment_enabled:
+        raise HTTPException(status_code=403, detail="sentiment disabled for guild")
+    plan = await fetch_guild_plan(db, guild_id)
+
+    days = max(1, min(days, 365 if plan == "pro" else 30))
+    to_day = datetime.now(timezone.utc)
+    from_day = to_day - timedelta(days=days)
+    points = await fetch_sentiment_daily(db, guild_id, from_day, to_day)
+    return {"guild_id": guild_id, "from": from_day.date().isoformat(), "to": to_day.date().isoformat(), "points": points}
+
+
+@app.get("/guilds/{guild_id}/sentiment/report")
+async def sentiment_report(guild_id: str, request: Request, day: Optional[str] = None) -> Dict[str, Any]:
+    await _require_guild_access(request, guild_id)
+    db: Database = request.app.state.db
+    settings = await fetch_guild_settings(db, guild_id)
+    if not settings.sentiment_enabled:
+        raise HTTPException(status_code=403, detail="sentiment disabled for guild")
+    plan = await fetch_guild_plan(db, guild_id)
+    if plan != "pro":
+        raise HTTPException(status_code=402, detail="sentiment report requires pro plan")
+
+    target = datetime.now(timezone.utc)
+    if day:
+        target = datetime.fromisoformat(day).replace(tzinfo=timezone.utc)
+    report = await fetch_sentiment_report(db, guild_id, target)
+    return {"guild_id": guild_id, "day": target.date().isoformat(), "report": report}
+
+
+@app.get("/guilds/{guild_id}/moderation/logs")
+async def moderation_logs(guild_id: str, request: Request, limit: int = 200) -> Dict[str, Any]:
+    await _require_guild_access(request, guild_id)
+    db: Database = request.app.state.db
+    settings = await fetch_guild_settings(db, guild_id)
+    if not settings.moderation_enabled:
+        raise HTTPException(status_code=403, detail="moderation disabled for guild")
+    plan = await fetch_guild_plan(db, guild_id)
+    if plan != "pro":
+        raise HTTPException(status_code=402, detail="moderation log history requires pro plan")
+
+    limit = max(1, min(limit, 500))
+    rows = await fetch_moderation_logs(db, guild_id, limit=limit)
+    return {"guild_id": guild_id, "items": rows}
 
 
 @app.post("/webhooks/discord")

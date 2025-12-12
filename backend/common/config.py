@@ -34,6 +34,14 @@ class AppConfig:
     api_base: Optional[str] = None
     database_url: Optional[str] = None
     discord_token: Optional[str] = None
+    discord_client_id: Optional[str] = None
+    discord_client_secret: Optional[str] = None
+    discord_oauth_redirect_uri: Optional[str] = None
+    frontend_base_url: Optional[str] = None
+    session_secret: Optional[str] = None
+    openrouter_api_key: Optional[str] = None
+    openrouter_model: str = "deepseek/deepseek-v3.2"
+    dev_admin_token: Optional[str] = None
     redis: RedisConfig = RedisConfig()
     queue: QueueConfig = QueueConfig()
 
@@ -53,6 +61,14 @@ def load_app_config() -> AppConfig:
         api_base=os.getenv("API_BASE"),
         database_url=os.getenv("DATABASE_URL"),
         discord_token=os.getenv("DISCORD_TOKEN"),
+        discord_client_id=os.getenv("DISCORD_CLIENT_ID"),
+        discord_client_secret=os.getenv("DISCORD_CLIENT_SECRET"),
+        discord_oauth_redirect_uri=os.getenv("DISCORD_OAUTH_REDIRECT_URI"),
+        frontend_base_url=os.getenv("FRONTEND_BASE_URL"),
+        session_secret=os.getenv("SESSION_SECRET"),
+        openrouter_api_key=os.getenv("OPENROUTER_API_KEY"),
+        openrouter_model=os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-v3.2").strip(),
+        dev_admin_token=os.getenv("DEV_ADMIN_TOKEN"),
         redis=RedisConfig(url=redis_url),
         queue=QueueConfig(
             stream=queue_stream,
