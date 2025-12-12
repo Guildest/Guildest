@@ -64,7 +64,7 @@ export default async function DashboardPage() {
                   </CardHeader>
                   <CardContent>
                     <div className="flex items-center text-xs text-muted-foreground">
-                      <span className="flex h-2 w-2 rounded-full bg-green-500 mr-2" />
+                      <span className="flex h-2 w-2 rounded-full bg-secondary mr-2" />
                       Connected
                     </div>
                   </CardContent>

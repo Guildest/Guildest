@@ -100,7 +100,7 @@ export default async function GuildOverviewPage({
                 </div>
                 <div className="flex items-center gap-2">
                   {enabled ? (
-                    <span className="flex items-center gap-1 text-sm text-green-600">
+                    <span className="flex items-center gap-1 text-sm text-secondary">
                       <Check className="h-4 w-4" /> Enabled
                     </span>
                   ) : (

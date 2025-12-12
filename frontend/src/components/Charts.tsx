@@ -23,7 +23,7 @@ export function SimpleLineChart(props: {
           <XAxis dataKey={props.xKey} hide />
           <YAxis width={32} />
           <Tooltip />
-          <Line type="monotone" dataKey={props.yKey} stroke="#18181b" dot={false} />
+          <Line type="monotone" dataKey={props.yKey} stroke="hsl(var(--primary))" dot={false} />
         </LineChart>
       </ResponsiveContainer>
     </div>

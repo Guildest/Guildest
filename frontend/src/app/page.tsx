@@ -71,8 +71,8 @@ export default function Home() {
 
             <div className="grid md:grid-cols-3 gap-8">
               <div className="bg-card rounded-xl border p-8 space-y-4">
-                <div className="h-12 w-12 rounded-lg bg-blue-100 dark:bg-blue-900/20 flex items-center justify-center">
-                  <BarChart3 className="h-6 w-6 text-blue-600 dark:text-blue-400" />
+                <div className="h-12 w-12 rounded-lg bg-secondary/20 flex items-center justify-center">
+                  <BarChart3 className="h-6 w-6 text-secondary" />
                 </div>
                 <h3 className="text-xl font-bold">Advanced Analytics</h3>
                 <p className="text-muted-foreground">
@@ -81,8 +81,8 @@ export default function Home() {
               </div>
 
               <div className="bg-card rounded-xl border p-8 space-y-4">
-                <div className="h-12 w-12 rounded-lg bg-green-100 dark:bg-green-900/20 flex items-center justify-center">
-                  <Bot className="h-6 w-6 text-green-600 dark:text-green-400" />
+                <div className="h-12 w-12 rounded-lg bg-primary/20 flex items-center justify-center">
+                  <Bot className="h-6 w-6 text-primary" />
                 </div>
                 <h3 className="text-xl font-bold">Sentiment Analysis</h3>
                 <p className="text-muted-foreground">
@@ -91,8 +91,8 @@ export default function Home() {
               </div>
 
               <div className="bg-card rounded-xl border p-8 space-y-4">
-                <div className="h-12 w-12 rounded-lg bg-red-100 dark:bg-red-900/20 flex items-center justify-center">
-                  <Shield className="h-6 w-6 text-red-600 dark:text-red-400" />
+                <div className="h-12 w-12 rounded-lg bg-muted flex items-center justify-center">
+                  <Shield className="h-6 w-6 text-foreground" />
                 </div>
                 <h3 className="text-xl font-bold">Automated Moderation</h3>
                 <p className="text-muted-foreground">
@@ -115,7 +115,7 @@ export default function Home() {
 
             <div className="grid md:grid-cols-2 gap-8 max-w-4xl mx-auto">
               {/* Free Plan */}
-              <div className="rounded-xl border p-8 space-y-6">
+              <div className="rounded-xl border p-8 space-y-6 bg-card">
                 <div className="space-y-2">
                   <h3 className="text-2xl font-bold">Free</h3>
                   <p className="text-muted-foreground">For small communities</p>
@@ -123,15 +123,15 @@ export default function Home() {
                 <div className="text-3xl font-bold">$0 <span className="text-base font-normal text-muted-foreground">/mo</span></div>
                 <ul className="space-y-3 pt-4">
                   <li className="flex items-center gap-2">
-                    <CheckCircle2 className="h-4 w-4 text-green-500" />
+                    <CheckCircle2 className="h-4 w-4 text-secondary" />
                     <span>Basic Analytics (7 days)</span>
                   </li>
                   <li className="flex items-center gap-2">
-                    <CheckCircle2 className="h-4 w-4 text-green-500" />
+                    <CheckCircle2 className="h-4 w-4 text-secondary" />
                     <span>Standard Moderation</span>
                   </li>
                   <li className="flex items-center gap-2">
-                    <CheckCircle2 className="h-4 w-4 text-green-500" />
+                    <CheckCircle2 className="h-4 w-4 text-secondary" />
                     <span>Up to 10 custom commands</span>
                   </li>
                 </ul>
@@ -139,7 +139,7 @@ export default function Home() {
               </div>
 
               {/* Pro Plan */}
-              <div className="rounded-xl border border-primary p-8 space-y-6 relative overflow-hidden">
+              <div className="rounded-xl border border-primary p-8 space-y-6 relative overflow-hidden bg-card">
                 <div className="absolute top-0 right-0 bg-primary text-primary-foreground px-3 py-1 text-xs font-medium rounded-bl-lg">
                   POPULAR
                 </div>

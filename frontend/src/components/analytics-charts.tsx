@@ -36,21 +36,22 @@ export function MessageVolumeChart({ data }: MessageVolumeChartProps) {
           <BarChart data={chartData}>
             <XAxis
               dataKey="date"
-              stroke="#888888"
+              stroke="#626C66"
               fontSize={12}
               tickLine={false}
               axisLine={false}
             />
             <YAxis
-              stroke="#888888"
+              stroke="#626C66"
               fontSize={12}
               tickLine={false}
               axisLine={false}
               tickFormatter={(value) => `${value}`}
             />
             <Tooltip 
-                contentStyle={{ backgroundColor: 'var(--background)', borderColor: 'var(--border)' }}
-                itemStyle={{ color: 'var(--foreground)' }}
+                contentStyle={{ backgroundColor: 'hsl(var(--card))', borderColor: 'hsl(var(--border))', color: 'hsl(var(--foreground))' }}
+                itemStyle={{ color: 'hsl(var(--foreground))' }}
+                cursor={{ fill: 'hsl(var(--muted))' }}
             />
             <Bar dataKey="count" fill="currentColor" radius={[4, 4, 0, 0]} className="fill-primary" />
           </BarChart>

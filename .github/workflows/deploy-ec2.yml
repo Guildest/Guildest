@@ -41,7 +41,6 @@ jobs:
           target: ${{ env.DEPLOY_PATH }}
           rm: false
           strip_components: 0
-          recursive: true
           timeout: 120s
 
       - name: Build, smoke-test, and restart container on EC2

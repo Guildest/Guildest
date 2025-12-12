@@ -175,7 +175,7 @@ export function SettingsForm({ initialSettings, guildId }: SettingsFormProps) {
         </CardContent>
         <CardFooter className="flex justify-between border-t px-6 py-4">
            {message && (
-            <p className={message.type === 'success' ? "text-green-600" : "text-destructive"}>
+            <p className={message.type === 'success' ? "text-green-400" : "text-destructive"}>
               {message.text}
             </p>
           )}
