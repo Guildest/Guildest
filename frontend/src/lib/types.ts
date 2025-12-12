@@ -39,5 +39,18 @@ export type ModerationLogItem = {
   reason: string | null;
   created_at: string;
 };
+
 export type ModerationLogsResponse = { guild_id: string; items: ModerationLogItem[] };
+
+export type GuildSettings = {
+  guild_id: string;
+  prefix: string;
+  language: string;
+  timezone: string;
+  analytics_enabled: boolean;
+  sentiment_enabled: boolean;
+  moderation_enabled: boolean;
+  welcome_channel_id?: string;
+  log_channel_id?: string;
+};
 

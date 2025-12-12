@@ -16,8 +16,10 @@ concurrency:
 env:
   DEPLOY_PATH: /home/ubuntu/guildest
   APP_NAME: guildest
+  FRONTEND_APP_NAME: guildest-frontend
   SMOKE_TEST_CMD: python -m compileall backend
   DOCKERFILE_PATH: Dockerfile
+  FRONTEND_DOCKERFILE_PATH: frontend/Dockerfile
   COMPOSE_FILE: docker-compose.prod.yml
 
 jobs:
@@ -87,6 +89,8 @@ jobs:
             OPENROUTER_MODEL=${{ secrets.OPENROUTER_MODEL || 'deepseek/deepseek-v3.2' }}
             IMAGE_NAME=${{ env.APP_NAME }}
             IMAGE_TAG=${{ github.sha }}
+            FRONTEND_IMAGE_NAME=${{ env.FRONTEND_APP_NAME }}
+            FRONTEND_IMAGE_TAG=${{ github.sha }}
             EOF
 
             mkdir -p "${{ env.DEPLOY_PATH }}/data"
@@ -106,21 +110,47 @@ jobs:
               exit 1
             fi
 
-            echo "Smoke test passed; rolling out services (compose: ${{ env.COMPOSE_FILE }})..."
+            echo "Smoke test passed."
+
+            echo "Building frontend Docker image (Dockerfile: ${{ env.FRONTEND_DOCKERFILE_PATH }})..."
+            sudo DOCKER_BUILDKIT=1 docker build \
+              -f "${{ env.FRONTEND_DOCKERFILE_PATH }}" \
+              --build-arg BUILDKIT_INLINE_CACHE=1 \
+              -t "${{ env.FRONTEND_APP_NAME }}:${{ github.sha }}" \
+              ./frontend
+
+            echo "Tagging images as latest..."
             sudo docker tag "${{ env.APP_NAME }}:${{ github.sha }}" "${{ env.APP_NAME }}:latest"
+            sudo docker tag "${{ env.FRONTEND_APP_NAME }}:${{ github.sha }}" "${{ env.FRONTEND_APP_NAME }}:latest"
+
+            echo "Rolling out services (compose: ${{ env.COMPOSE_FILE }})..."
 
             # Ensure compose uses the exact image we just built.
             sudo docker compose --env-file .env -f "${{ env.COMPOSE_FILE }}" up -d --remove-orphans
 
-            echo "Performing post-start health check (API /health)..."
+            echo "Performing post-start health checks..."
+
+            # Backend API health check
+            echo "Checking backend API..."
             for i in 1 2 3 4 5 6 7 8 9 10; do
               if curl -fsS http://localhost:8000/health >/dev/null; then
-                echo "Health check OK."
+                echo "Backend API health check OK."
                 break
               fi
               sleep 2
             done
             curl -fsS http://localhost:8000/health
+
+            # Frontend health check (through nginx)
+            echo "Checking frontend..."
+            for i in 1 2 3 4 5 6 7 8 9 10; do
+              if curl -fsS -I http://localhost:80 >/dev/null 2>&1; then
+                echo "Frontend health check OK."
+                break
+              fi
+              sleep 2
+            done
+            curl -fsS -I http://localhost:80
 
             echo "Cleaning old images (keep caches for faster builds)..."
             sudo docker image prune -f --filter "until=168h"

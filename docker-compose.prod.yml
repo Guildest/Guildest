@@ -91,3 +91,13 @@ services:
       QUEUE_GROUP: ${QUEUE_GROUP:-guildest-workers}
       QUEUE_CONSUMER: ${QUEUE_CONSUMER_COMMANDS:-commands-1}
       DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL}
+
+  frontend:
+    image: ${FRONTEND_IMAGE_NAME:-guildest-frontend}:${FRONTEND_IMAGE_TAG:-latest}
+    environment:
+      NEXT_PUBLIC_API_URL: /api
+      NODE_ENV: production
+    ports:
+      - "80:80"
+    depends_on:
+      - api
