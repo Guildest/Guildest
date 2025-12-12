@@ -4,13 +4,12 @@ version: "3.9"
 # - Uses externally-managed Postgres/Redis (set env vars).
 # - Runs API + gateway + workers (including commands).
 #
-# Build ARM64 images in CI and set `image:` tags here (recommended).
+# This file expects you to provide a prebuilt image via `IMAGE_NAME` + `IMAGE_TAG`.
+# Recommended: build on an ARM64 runner (or buildx) and deploy by pulling the image.
 
 services:
   api:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ${IMAGE_NAME:-guildest}:${IMAGE_TAG:-latest}
     command: ["python", "-m", "backend.api.main"]
     environment:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
@@ -27,9 +26,7 @@ services:
       - "8000:8000"
 
   gateway:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ${IMAGE_NAME:-guildest}:${IMAGE_TAG:-latest}
     command: ["python", "-m", "backend.discord_gateway.main"]
     environment:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
@@ -44,8 +41,7 @@ services:
       DATABASE_URL: ${DATABASE_URL:-}
 
   worker-analytics:
-    build:
-      context: .
+    image: ${IMAGE_NAME:-guildest}:${IMAGE_TAG:-latest}
     command: ["python", "-m", "backend.workers.analytics.main"]
     environment:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
@@ -57,8 +53,7 @@ services:
       DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL}
 
   worker-moderation:
-    build:
-      context: .
+    image: ${IMAGE_NAME:-guildest}:${IMAGE_TAG:-latest}
     command: ["python", "-m", "backend.workers.moderation.main"]
     environment:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
@@ -70,8 +65,7 @@ services:
       DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL}
 
   worker-sentiment:
-    build:
-      context: .
+    image: ${IMAGE_NAME:-guildest}:${IMAGE_TAG:-latest}
     command: ["python", "-m", "backend.workers.sentiment.main"]
     environment:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
@@ -85,8 +79,7 @@ services:
       OPENROUTER_MODEL: ${OPENROUTER_MODEL:-deepseek/deepseek-v3.2}
 
   worker-commands:
-    build:
-      context: .
+    image: ${IMAGE_NAME:-guildest}:${IMAGE_TAG:-latest}
     command: ["python", "-m", "backend.workers.commands.main"]
     environment:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}

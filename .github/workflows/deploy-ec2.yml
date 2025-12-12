@@ -18,6 +18,7 @@ env:
   APP_NAME: guildest
   SMOKE_TEST_CMD: python -m compileall backend
   DOCKERFILE_PATH: Dockerfile
+  COMPOSE_FILE: docker-compose.prod.yml
 
 jobs:
   deploy:
@@ -55,15 +56,37 @@ jobs:
             cd "${{ env.DEPLOY_PATH }}"
 
             # Write .env from GitHub Secrets (add/remove as needed)
+            # TODO (GitHub Secrets): add these keys for full functionality
+            # - DISCORD_TOKEN
+            # - DISCORD_APPLICATION_ID (slash command registration)
+            # - DISCORD_COMMANDS_GUILD_ID (optional; faster slash command propagation)
+            # - DATABASE_URL (managed Postgres recommended for t4g.nano)
+            # - REDIS_URL (managed Redis recommended for t4g.nano)
+            # - SESSION_SECRET (long random string)
+            # - FRONTEND_BASE_URL (e.g. https://your-domain)
+            # - DISCORD_CLIENT_ID (OAuth)
+            # - DISCORD_CLIENT_SECRET (OAuth)
+            # - DISCORD_OAUTH_REDIRECT_URI (OAuth callback URL)
+            # - OPENROUTER_API_KEY (optional; Pro sentiment reports)
+            # - OPENROUTER_MODEL (optional; defaults deepseek/deepseek-v3.2)
             cat > .env <<'EOF'
-            # Example envs; replace with your real keys in repo settings
-            API_BASE=${{ secrets.API_BASE }}
             DISCORD_TOKEN=${{ secrets.DISCORD_TOKEN }}
+            DISCORD_APPLICATION_ID=${{ secrets.DISCORD_APPLICATION_ID }}
+            DISCORD_COMMANDS_GUILD_ID=${{ secrets.DISCORD_COMMANDS_GUILD_ID }}
             DATABASE_URL=${{ secrets.DATABASE_URL }}
             REDIS_URL=${{ secrets.REDIS_URL }}
             QUEUE_STREAM=${{ secrets.QUEUE_STREAM || 'guildest:events' }}
             QUEUE_MAX_LENGTH=${{ secrets.QUEUE_MAX_LENGTH || '5000' }}
             LOG_LEVEL=${{ secrets.LOG_LEVEL || 'INFO' }}
+            SESSION_SECRET=${{ secrets.SESSION_SECRET }}
+            FRONTEND_BASE_URL=${{ secrets.FRONTEND_BASE_URL }}
+            DISCORD_CLIENT_ID=${{ secrets.DISCORD_CLIENT_ID }}
+            DISCORD_CLIENT_SECRET=${{ secrets.DISCORD_CLIENT_SECRET }}
+            DISCORD_OAUTH_REDIRECT_URI=${{ secrets.DISCORD_OAUTH_REDIRECT_URI }}
+            OPENROUTER_API_KEY=${{ secrets.OPENROUTER_API_KEY }}
+            OPENROUTER_MODEL=${{ secrets.OPENROUTER_MODEL || 'deepseek/deepseek-v3.2' }}
+            IMAGE_NAME=${{ env.APP_NAME }}
+            IMAGE_TAG=${{ github.sha }}
             EOF
 
             mkdir -p "${{ env.DEPLOY_PATH }}/data"
@@ -83,31 +106,23 @@ jobs:
               exit 1
             fi
 
-            echo "Smoke test passed; rolling out new container..."
+            echo "Smoke test passed; rolling out services (compose: ${{ env.COMPOSE_FILE }})..."
             sudo docker tag "${{ env.APP_NAME }}:${{ github.sha }}" "${{ env.APP_NAME }}:latest"
 
-            sudo docker stop "${{ env.APP_NAME }}" 2>/dev/null || true
-            sudo docker rm "${{ env.APP_NAME }}" 2>/dev/null || true
+            # Ensure compose uses the exact image we just built.
+            sudo docker compose --env-file .env -f "${{ env.COMPOSE_FILE }}" up -d --remove-orphans
 
-            sudo docker run -d \
-              --name "${{ env.APP_NAME }}" \
-              --restart unless-stopped \
-              --env-file .env \
-              --memory=512m \
-              --log-opt max-size=10m \
-              --log-opt max-file=3 \
-              -v "${{ env.DEPLOY_PATH }}/data:/app/data" \
-              "${{ env.APP_NAME }}:latest"
+            echo "Performing post-start health check (API /health)..."
+            for i in 1 2 3 4 5 6 7 8 9 10; do
+              if curl -fsS http://localhost:8000/health >/dev/null; then
+                echo "Health check OK."
+                break
+              fi
+              sleep 2
+            done
+            curl -fsS http://localhost:8000/health
 
-            echo "Performing post-start health check..."
-            sleep 5
-            if ! sudo docker ps --filter "name=${{ env.APP_NAME }}" --filter "status=running" --format '{{.Names}}' | grep -q "${{ env.APP_NAME }}"; then
-              echo "Container is not running; dumping logs."
-              sudo docker logs "${{ env.APP_NAME }}" --tail 80 || true
-              exit 1
-            fi
-
-            echo "Cleaning dangling images..."
-            sudo docker image prune -f
+            echo "Cleaning old images (keep caches for faster builds)..."
+            sudo docker image prune -f --filter "until=168h"
 
             echo "Deploy completed."
