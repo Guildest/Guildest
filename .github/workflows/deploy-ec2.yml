@@ -125,7 +125,7 @@ jobs:
             echo "Rolling out services (compose: ${{ env.COMPOSE_FILE }})..."
 
             # Ensure compose uses the exact image we just built.
-            sudo docker compose --env-file .env -f "${{ env.COMPOSE_FILE }}" up -d --remove-orphans
+            sudo docker-compose --env-file .env -f "${{ env.COMPOSE_FILE }}" up -d --remove-orphans
 
             echo "Performing post-start health checks..."
 
