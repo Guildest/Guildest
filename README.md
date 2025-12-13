@@ -2,8 +2,9 @@
 
 Monorepo for the Guildest Discord bot and supporting web services.
 
-- `frontend/`: Next.js dashboard for analytics, settings, and billing.
-- `backend/`: Services for Discord gateway, queue, workers, HTTP API, and database schemas.
+- `frontend/`: Next.js dashboard for analytics, settings, and billing (with nginx reverse proxy)
+- `backend/`: Services for Discord gateway, queue, workers, HTTP API, and database schemas
+- `docs/`: Docusaurus documentation site
 
 ## Stack Overview
 - Discord gateway: Hikari (Python)
