@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  DEPLOY_PATH: /home/ubuntu/guildest
+  DEPLOY_PATH: /home/ec2-user/guildest
   APP_NAME: guildest
   FRONTEND_APP_NAME: guildest-frontend
   SMOKE_TEST_CMD: python -m compileall backend
