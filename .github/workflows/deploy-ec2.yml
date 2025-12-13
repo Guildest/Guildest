@@ -94,9 +94,9 @@ jobs:
 
             mkdir -p "${{ env.DEPLOY_PATH }}/data"
 
-            echo "Building Docker image on arm64 host (Dockerfile: ${DOCKERFILE_PATH})..."
+            echo "Building Docker image on arm64 host (Dockerfile: ${{ env.DOCKERFILE_PATH }})..."
             sudo DOCKER_BUILDKIT=1 docker build \
-              -f "${DOCKERFILE_PATH}" \
+              -f "${{ env.DOCKERFILE_PATH }}" \
               --build-arg BUILDKIT_INLINE_CACHE=1 \
               -t "${{ env.APP_NAME }}:${{ github.sha }}" \
               .
