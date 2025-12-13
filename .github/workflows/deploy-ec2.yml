@@ -31,6 +31,42 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build backend Docker image
+        run: |
+          docker buildx build \
+            --platform linux/arm64 \
+            --load \
+            -f ${{ env.DOCKERFILE_PATH }} \
+            --build-arg BUILDKIT_INLINE_CACHE=1 \
+            -t ${{ env.APP_NAME }}:${{ github.sha }} \
+            -t ${{ env.APP_NAME }}:latest \
+            .
+
+      - name: Build frontend Docker image
+        run: |
+          docker buildx build \
+            --platform linux/arm64 \
+            --load \
+            -f ${{ env.FRONTEND_DOCKERFILE_PATH }} \
+            --build-arg BUILDKIT_INLINE_CACHE=1 \
+            -t ${{ env.FRONTEND_APP_NAME }}:${{ github.sha }} \
+            -t ${{ env.FRONTEND_APP_NAME }}:latest \
+            ./frontend
+
+      - name: Run smoke test on backend image
+        run: |
+          docker run --rm --entrypoint "" \
+            ${{ env.APP_NAME }}:${{ github.sha }} \
+            sh -c "${{ env.SMOKE_TEST_CMD }}"
+
+      - name: Save Docker images to tar files
+        run: |
+          docker save ${{ env.APP_NAME }}:${{ github.sha }} ${{ env.APP_NAME }}:latest | gzip > backend-image.tar.gz
+          docker save ${{ env.FRONTEND_APP_NAME }}:${{ github.sha }} ${{ env.FRONTEND_APP_NAME }}:latest | gzip > frontend-image.tar.gz
+
       - name: Copy repo to EC2 (arm/t4g)
         uses: appleboy/scp-action@v0.1.7
         with:
@@ -43,7 +79,17 @@ jobs:
           strip_components: 0
           timeout: 120s
 
-      - name: Build, smoke-test, and restart container on EC2
+      - name: Copy Docker images to EC2
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          source: "backend-image.tar.gz,frontend-image.tar.gz"
+          target: ${{ env.DEPLOY_PATH }}
+          timeout: 300s
+
+      - name: Load images and deploy on EC2
         id: deploy_step
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -94,33 +140,14 @@ jobs:
 
             mkdir -p "${{ env.DEPLOY_PATH }}/data"
 
-            echo "Building Docker image on arm64 host (Dockerfile: ${{ env.DOCKERFILE_PATH }})..."
-            sudo DOCKER_BUILDKIT=1 docker build \
-              -f "${{ env.DOCKERFILE_PATH }}" \
-              --build-arg BUILDKIT_INLINE_CACHE=1 \
-              -t "${{ env.APP_NAME }}:${{ github.sha }}" \
-              .
+            echo "Loading backend Docker image..."
+            sudo docker load -i backend-image.tar.gz
 
-            echo "Running smoke test: '${{ env.SMOKE_TEST_CMD }}'"
-            if ! sudo docker run --rm --entrypoint "" \
-              "${{ env.APP_NAME }}:${{ github.sha }}" \
-              sh -c "${{ env.SMOKE_TEST_CMD }}"; then
-              echo "Smoke test failed; aborting deploy."
-              exit 1
-            fi
+            echo "Loading frontend Docker image..."
+            sudo docker load -i frontend-image.tar.gz
 
-            echo "Smoke test passed."
-
-            echo "Building frontend Docker image (Dockerfile: ${{ env.FRONTEND_DOCKERFILE_PATH }})..."
-            sudo DOCKER_BUILDKIT=1 docker build \
-              -f "${{ env.FRONTEND_DOCKERFILE_PATH }}" \
-              --build-arg BUILDKIT_INLINE_CACHE=1 \
-              -t "${{ env.FRONTEND_APP_NAME }}:${{ github.sha }}" \
-              ./frontend
-
-            echo "Tagging images as latest..."
-            sudo docker tag "${{ env.APP_NAME }}:${{ github.sha }}" "${{ env.APP_NAME }}:latest"
-            sudo docker tag "${{ env.FRONTEND_APP_NAME }}:${{ github.sha }}" "${{ env.FRONTEND_APP_NAME }}:latest"
+            echo "Cleaning up tar files..."
+            rm -f backend-image.tar.gz frontend-image.tar.gz
 
             echo "Rolling out services (compose: ${{ env.COMPOSE_FILE }})..."
 
