@@ -1,5 +1,5 @@
 # Stage 1: Dependencies
-FROM node:20-alpine AS deps
+FROM node:20-slim AS deps
 WORKDIR /app
 
 # Copy package files
@@ -9,7 +9,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --only=production
 
 # Stage 2: Builder
-FROM node:20-alpine AS builder
+FROM node:20-slim AS builder
 WORKDIR /app
 
 # Copy package files
@@ -25,14 +25,17 @@ COPY . .
 RUN npm run build
 
 # Stage 3: Runner with nginx
-FROM node:20-alpine AS runner
+FROM node:20-slim AS runner
 WORKDIR /app
 
 # Install nginx and supervisor
-RUN apk add --no-cache nginx supervisor
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends nginx supervisor && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
 # Create necessary directories
-RUN mkdir -p /var/log/nginx /var/lib/nginx/tmp /run/nginx /var/log/supervisor
+RUN mkdir -p /var/log/nginx /var/log/supervisor
 
 # Copy Next.js build artifacts
 COPY --from=builder /app/.next ./.next
