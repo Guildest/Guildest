@@ -211,6 +211,11 @@ jobs:
 
             mkdir -p "${{ env.DEPLOY_PATH }}/data"
 
+            echo "Freeing disk space before loading images..."
+            sudo docker container prune -f || true
+            sudo docker image prune -af || true
+            sudo docker builder prune -af || true
+
             echo "Loading backend Docker image..."
             gzip -dc backend-image.tar.gz | sudo docker load
 
