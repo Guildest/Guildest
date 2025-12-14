@@ -25,7 +25,7 @@ env:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
 
     steps:
       - name: Checkout repo
@@ -72,17 +72,15 @@ jobs:
           docker save ${{ env.APP_NAME }}:${{ github.sha }} ${{ env.APP_NAME }}:latest | gzip > backend-image.tar.gz
           docker save ${{ env.FRONTEND_APP_NAME }}:${{ github.sha }} ${{ env.FRONTEND_APP_NAME }}:latest | gzip > frontend-image.tar.gz
 
-      - name: Copy repo to EC2 (arm/t4g)
+      - name: Copy compose file to EC2 (arm/t4g)
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USERNAME }}
           key: ${{ secrets.EC2_SSH_KEY }}
-          source: "."
+          source: "${{ env.COMPOSE_FILE }}"
           target: ${{ env.DEPLOY_PATH }}
-          rm: false
-          strip_components: 0
-          timeout: 120s
+          timeout: 60s
 
       - name: Copy Docker images to EC2
         uses: appleboy/scp-action@v0.1.7
@@ -92,7 +90,7 @@ jobs:
           key: ${{ secrets.EC2_SSH_KEY }}
           source: "backend-image.tar.gz,frontend-image.tar.gz"
           target: ${{ env.DEPLOY_PATH }}
-          timeout: 300s
+          timeout: 900s
 
       - name: Load images and deploy on EC2
         id: deploy_step
