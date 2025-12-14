@@ -85,17 +85,34 @@ jobs:
           printf "%s\n" "$SSH_KEY" > "$key_file"
           chmod 600 "$key_file"
 
-          ssh -i "$key_file" \
-            -o StrictHostKeyChecking=no \
-            -o UserKnownHostsFile=/dev/null \
-            -o ConnectTimeout=10 \
+          ssh_opts=(
+            -i "$key_file"
+            -o StrictHostKeyChecking=no
+            -o UserKnownHostsFile=/dev/null
+            -o ConnectTimeout=10
+          )
+
+          retry() {
+            local attempts="$1" delay="$2"
+            shift 2
+            local n=1
+            while true; do
+              if "$@"; then
+                return 0
+              fi
+              if [ "$n" -ge "$attempts" ]; then
+                return 1
+              fi
+              sleep "$delay"
+              n=$((n + 1))
+            done
+          }
+
+          retry 3 5 ssh "${ssh_opts[@]}" \
             "${{ secrets.EC2_USERNAME }}@${{ secrets.EC2_HOST }}" \
             "mkdir -p '${{ env.DEPLOY_PATH }}'"
 
-          scp -i "$key_file" \
-            -o StrictHostKeyChecking=no \
-            -o UserKnownHostsFile=/dev/null \
-            -o ConnectTimeout=10 \
+          retry 3 5 scp "${ssh_opts[@]}" \
             "${{ env.COMPOSE_FILE }}" \
             "${{ secrets.EC2_USERNAME }}@${{ secrets.EC2_HOST }}:${{ env.DEPLOY_PATH }}/"
 
