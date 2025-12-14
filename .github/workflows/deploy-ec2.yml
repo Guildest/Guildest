@@ -73,14 +73,31 @@ jobs:
           docker save ${{ env.FRONTEND_APP_NAME }}:${{ github.sha }} ${{ env.FRONTEND_APP_NAME }}:latest | gzip > frontend-image.tar.gz
 
       - name: Copy compose file to EC2 (arm/t4g)
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USERNAME }}
-          key: ${{ secrets.EC2_SSH_KEY }}
-          source: "${{ env.COMPOSE_FILE }}"
-          target: ${{ env.DEPLOY_PATH }}
-          timeout: 60s
+        env:
+          SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          key_file="$(mktemp)"
+          trap 'rm -f "$key_file"' EXIT
+
+          printf "%s\n" "$SSH_KEY" > "$key_file"
+          chmod 600 "$key_file"
+
+          ssh -i "$key_file" \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            -o ConnectTimeout=10 \
+            "${{ secrets.EC2_USERNAME }}@${{ secrets.EC2_HOST }}" \
+            "mkdir -p '${{ env.DEPLOY_PATH }}'"
+
+          scp -i "$key_file" \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            -o ConnectTimeout=10 \
+            "${{ env.COMPOSE_FILE }}" \
+            "${{ secrets.EC2_USERNAME }}@${{ secrets.EC2_HOST }}:${{ env.DEPLOY_PATH }}/"
 
       - name: Copy Docker images to EC2
         uses: appleboy/scp-action@v0.1.7
