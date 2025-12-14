@@ -46,3 +46,19 @@ npm run dev
 - A `t4g.nano` is extremely resource constrained; running Postgres + Redis + API + gateway + multiple workers + Next.js on the same box will likely OOM.
   - Recommended: use managed Postgres + managed Redis, and run only the app containers on the instance.
   - Recommended: build images in CI on an ARM64 runner (or `buildx --platform linux/arm64`) and deploy prebuilt images (avoid compiling on the nano).
+
+## Production (docker-compose.prod.yml)
+
+`docker-compose.prod.yml` assumes Postgres + Redis are managed externally and provided via `.env`.
+
+Required `.env` keys:
+- `DATABASE_URL` (for API + workers; include SSL params if your provider requires it, e.g. `?sslmode=require`)
+- `REDIS_URL`
+- `SESSION_SECRET`
+- `FRONTEND_BASE_URL` (the public URL, e.g. `https://yourdomain.com`)
+- `DISCORD_TOKEN`
+
+Also required for Discord OAuth login:
+- `DISCORD_CLIENT_ID`
+- `DISCORD_CLIENT_SECRET`
+- `DISCORD_OAUTH_REDIRECT_URI`

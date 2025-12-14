@@ -1,5 +1,5 @@
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 
@@ -42,8 +42,8 @@ class AppConfig:
     openrouter_api_key: Optional[str] = None
     openrouter_model: str = "deepseek/deepseek-v3.2"
     dev_admin_token: Optional[str] = None
-    redis: RedisConfig = RedisConfig()
-    queue: QueueConfig = QueueConfig()
+    redis: RedisConfig = field(default_factory=RedisConfig)
+    queue: QueueConfig = field(default_factory=QueueConfig)
 
 
 def load_app_config() -> AppConfig:
