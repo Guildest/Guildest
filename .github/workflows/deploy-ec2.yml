@@ -31,6 +31,11 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
+      - name: Set up QEMU (for arm64 smoke tests)
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -58,7 +63,7 @@ jobs:
 
       - name: Run smoke test on backend image
         run: |
-          docker run --rm --entrypoint "" \
+          docker run --rm --platform linux/arm64 --entrypoint "" \
             ${{ env.APP_NAME }}:${{ github.sha }} \
             sh -c "${{ env.SMOKE_TEST_CMD }}"
 
@@ -141,10 +146,10 @@ jobs:
             mkdir -p "${{ env.DEPLOY_PATH }}/data"
 
             echo "Loading backend Docker image..."
-            sudo docker load -i backend-image.tar.gz
+            gzip -dc backend-image.tar.gz | sudo docker load
 
             echo "Loading frontend Docker image..."
-            sudo docker load -i frontend-image.tar.gz
+            gzip -dc frontend-image.tar.gz | sudo docker load
 
             echo "Cleaning up tar files..."
             rm -f backend-image.tar.gz frontend-image.tar.gz
