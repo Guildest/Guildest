@@ -107,6 +107,29 @@ jobs:
 
             cd "${{ env.DEPLOY_PATH }}"
 
+            require_nonempty() {
+              key="$1"
+              if ! grep -q "^${key}=." .env; then
+                echo "Missing or empty required env var: ${key}"
+                exit 1
+              fi
+            }
+
+            dump_compose_diagnostics() {
+              echo "---- docker-compose ps ----"
+              compose ps || true
+              echo "---- api logs (tail) ----"
+              api_id="$(compose ps -q api || true)"
+              if [ -n "${api_id:-}" ]; then
+                sudo docker logs --tail=200 "${api_id}" || true
+              fi
+              echo "---- frontend logs (tail) ----"
+              fe_id="$(compose ps -q frontend || true)"
+              if [ -n "${fe_id:-}" ]; then
+                sudo docker logs --tail=200 "${fe_id}" || true
+              fi
+            }
+
             # Write .env from GitHub Secrets (add/remove as needed)
             # TODO (GitHub Secrets): add these keys for full functionality
             # - DISCORD_TOKEN
@@ -143,6 +166,17 @@ jobs:
             FRONTEND_IMAGE_TAG=${{ github.sha }}
             EOF
 
+            compose() {
+              sudo docker-compose --env-file .env -f "${{ env.COMPOSE_FILE }}" "$@"
+            }
+
+            # Validate required config early (avoids "connection reset" surprises later).
+            require_nonempty DATABASE_URL
+            require_nonempty REDIS_URL
+            require_nonempty SESSION_SECRET
+            require_nonempty FRONTEND_BASE_URL
+            require_nonempty DISCORD_TOKEN
+
             mkdir -p "${{ env.DEPLOY_PATH }}/data"
 
             echo "Loading backend Docker image..."
@@ -157,31 +191,49 @@ jobs:
             echo "Rolling out services (compose: ${{ env.COMPOSE_FILE }})..."
 
             # Ensure compose uses the exact image we just built.
-            sudo docker-compose --env-file .env -f "${{ env.COMPOSE_FILE }}" up -d --remove-orphans
+            compose up -d --remove-orphans
 
             echo "Performing post-start health checks..."
 
             # Backend API health check
             echo "Checking backend API..."
-            for i in 1 2 3 4 5 6 7 8 9 10; do
+            for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
               if curl -fsS http://localhost:8000/health >/dev/null; then
                 echo "Backend API health check OK."
                 break
               fi
+              api_id="$(compose ps -q api || true)"
+              if [ -n "${api_id:-}" ]; then
+                api_state="$(sudo docker inspect -f '{{.State.Status}}' "${api_id}" || true)"
+                if [ "${api_state:-}" != "running" ]; then
+                  echo "API container is not running (state: ${api_state:-unknown})."
+                  dump_compose_diagnostics
+                  exit 1
+                fi
+              fi
               sleep 2
             done
-            curl -fsS http://localhost:8000/health
+            curl -fsS http://localhost:8000/health || { dump_compose_diagnostics; exit 1; }
 
             # Frontend health check (through nginx)
             echo "Checking frontend..."
-            for i in 1 2 3 4 5 6 7 8 9 10; do
+            for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
               if curl -fsS -I http://localhost:80 >/dev/null 2>&1; then
                 echo "Frontend health check OK."
                 break
               fi
+              fe_id="$(compose ps -q frontend || true)"
+              if [ -n "${fe_id:-}" ]; then
+                fe_state="$(sudo docker inspect -f '{{.State.Status}}' "${fe_id}" || true)"
+                if [ "${fe_state:-}" != "running" ]; then
+                  echo "Frontend container is not running (state: ${fe_state:-unknown})."
+                  dump_compose_diagnostics
+                  exit 1
+                fi
+              fi
               sleep 2
             done
-            curl -fsS -I http://localhost:80
+            curl -fsS -I http://localhost:80 || { dump_compose_diagnostics; exit 1; }
 
             echo "Cleaning old images (keep caches for faster builds)..."
             sudo docker image prune -f --filter "until=168h"
