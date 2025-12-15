@@ -86,3 +86,35 @@ export async function logout() {
 }
 
 export const LOGIN_URL = `${API_BASE_URL}/auth/discord/login`;
+
+export function buildLoginUrl(redirectPath: string = "/dashboard"): string {
+  const safe = redirectPath.startsWith("/") && !redirectPath.startsWith("//") ? redirectPath : "/dashboard";
+  const qs = new URLSearchParams({ redirect: safe });
+  return `${LOGIN_URL}?${qs.toString()}`;
+}
+
+export async function createBillingCheckoutUrl(plan: "pro" = "pro"): Promise<string> {
+  const res = await fetch(`${API_BASE_URL}/billing/checkout`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ plan }),
+    credentials: "include",
+  });
+  if (res.status === 401) throw new Error("unauthenticated");
+  if (!res.ok) throw new Error(`Failed to create checkout session (${res.status})`);
+  const data = await res.json();
+  if (!data?.url) throw new Error("Missing checkout url");
+  return data.url;
+}
+
+export async function createBillingPortalUrl(): Promise<string> {
+  const res = await fetch(`${API_BASE_URL}/billing/portal`, {
+    method: "POST",
+    credentials: "include",
+  });
+  if (res.status === 401) throw new Error("unauthenticated");
+  if (!res.ok) throw new Error(`Failed to create portal session (${res.status})`);
+  const data = await res.json();
+  if (!data?.url) throw new Error("Missing portal url");
+  return data.url;
+}

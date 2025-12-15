@@ -8,6 +8,7 @@ import {
   BarChart3, 
   ShieldAlert, 
   Settings, 
+  CreditCard,
   LogOut,
   Menu,
   X
@@ -27,7 +28,8 @@ export function Sidebar({ guildId: propGuildId }: SidebarProps) {
   // Extract guildId from path if not provided
   // Assumes route structure /dashboard/[guildId]/...
   const pathSegments = pathname?.split("/") || [];
-  const derivedGuildId = pathSegments[1] === "dashboard" && pathSegments.length > 2 ? pathSegments[2] : undefined;
+  const candidateGuildId = pathSegments[1] === "dashboard" && pathSegments.length > 2 ? pathSegments[2] : undefined;
+  const derivedGuildId = candidateGuildId && candidateGuildId !== "billing" ? candidateGuildId : undefined;
   
   const guildId = propGuildId || derivedGuildId;
 
@@ -36,39 +38,50 @@ export function Sidebar({ guildId: propGuildId }: SidebarProps) {
     setIsOpen(false);
   }, [pathname]);
 
-  const routes = guildId ? [
-    {
-      href: `/dashboard/${guildId}`,
-      label: "Overview",
-      icon: LayoutDashboard,
-      active: pathname === `/dashboard/${guildId}`,
-    },
-    {
-      href: `/dashboard/${guildId}/analytics`,
-      label: "Analytics",
-      icon: BarChart3,
-      active: pathname === `/dashboard/${guildId}/analytics`,
-    },
-    {
-      href: `/dashboard/${guildId}/moderation`,
-      label: "Moderation",
-      icon: ShieldAlert,
-      active: pathname === `/dashboard/${guildId}/moderation`,
-    },
-    {
-      href: `/dashboard/${guildId}/settings`,
-      label: "Settings",
-      icon: Settings,
-      active: pathname === `/dashboard/${guildId}/settings`,
-    },
-  ] : [
-    {
-      href: "/dashboard",
-      label: "My Guilds",
-      icon: LayoutDashboard,
-      active: pathname === "/dashboard",
-    }
-  ];
+  const billingRoute = {
+    href: "/dashboard/billing",
+    label: "Billing",
+    icon: CreditCard,
+    active: pathname === "/dashboard/billing",
+  };
+
+  const routes = guildId
+    ? [
+        {
+          href: `/dashboard/${guildId}`,
+          label: "Overview",
+          icon: LayoutDashboard,
+          active: pathname === `/dashboard/${guildId}`,
+        },
+        {
+          href: `/dashboard/${guildId}/analytics`,
+          label: "Analytics",
+          icon: BarChart3,
+          active: pathname === `/dashboard/${guildId}/analytics`,
+        },
+        {
+          href: `/dashboard/${guildId}/moderation`,
+          label: "Moderation",
+          icon: ShieldAlert,
+          active: pathname === `/dashboard/${guildId}/moderation`,
+        },
+        {
+          href: `/dashboard/${guildId}/settings`,
+          label: "Settings",
+          icon: Settings,
+          active: pathname === `/dashboard/${guildId}/settings`,
+        },
+        billingRoute,
+      ]
+    : [
+        {
+          href: "/dashboard",
+          label: "My Guilds",
+          icon: LayoutDashboard,
+          active: pathname === "/dashboard",
+        },
+        billingRoute,
+      ];
 
   return (
     <>

@@ -20,6 +20,9 @@ services:
       DISCORD_CLIENT_ID: ${DISCORD_CLIENT_ID:?set DISCORD_CLIENT_ID}
       DISCORD_CLIENT_SECRET: ${DISCORD_CLIENT_SECRET:?set DISCORD_CLIENT_SECRET}
       DISCORD_OAUTH_REDIRECT_URI: ${DISCORD_OAUTH_REDIRECT_URI:?set DISCORD_OAUTH_REDIRECT_URI}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      STRIPE_PRO_PRICE_ID: ${STRIPE_PRO_PRICE_ID:-}
     ports:
       - "8000:8000"
 
@@ -94,6 +97,7 @@ services:
     image: ${FRONTEND_IMAGE_NAME:-guildest-frontend}:${FRONTEND_IMAGE_TAG:-latest}
     environment:
       NEXT_PUBLIC_API_URL: /api
+      API_BASE: http://api:8000
       NODE_ENV: production
     volumes:
       # Override nginx config at deploy-time so it doesn't hard-fail if `api` is

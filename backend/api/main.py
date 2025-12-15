@@ -4,10 +4,12 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 from urllib.parse import urlencode
 
+import stripe
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 from starlette.responses import RedirectResponse
 
 from backend.api.auth import (
@@ -30,6 +32,7 @@ from backend.database.db import (
     create_session,
     delete_session,
     fetch_user_guild_access,
+    fetch_subscription,
     fetch_guild_plan,
     fetch_guild_settings,
     fetch_message_counts,
@@ -38,10 +41,14 @@ from backend.database.db import (
     fetch_sentiment_report,
     fetch_session_user_id,
     fetch_subscription_plan,
+    fetch_user_id_by_stripe_customer_id,
     fetch_user_connected_guild_ids,
     fetch_user_guilds,
+    fetch_user_stripe_customer_id,
     init_db,
+    set_user_stripe_customer_id,
     set_subscription_plan,
+    upsert_stripe_subscription,
     upsert_guild_settings,
     upsert_user,
     upsert_user_guilds,
@@ -58,6 +65,10 @@ class WebhookPayload(BaseModel):
 
 class DevSetPlanBody(BaseModel):
     plan: str
+
+
+class BillingCheckoutBody(BaseModel):
+    plan: str = "pro"
 
 
 config = load_app_config()
@@ -96,6 +107,28 @@ def _require_session_secret() -> str:
     if not config.session_secret:
         raise HTTPException(status_code=500, detail="SESSION_SECRET is not configured")
     return config.session_secret
+
+
+def _require_stripe_secret_key() -> str:
+    if not config.stripe_secret_key:
+        raise HTTPException(status_code=404, detail="stripe billing not enabled")
+    return config.stripe_secret_key
+
+
+def _require_stripe_webhook_secret() -> str:
+    if not config.stripe_webhook_secret:
+        raise HTTPException(status_code=404, detail="stripe webhooks not enabled")
+    return config.stripe_webhook_secret
+
+
+def _require_stripe_pro_price_id() -> str:
+    if not config.stripe_pro_price_id:
+        raise HTTPException(status_code=500, detail="STRIPE_PRO_PRICE_ID is not configured")
+    return config.stripe_pro_price_id
+
+
+def _frontend_base_url() -> str:
+    return (config.frontend_base_url or "http://localhost:3000").rstrip("/")
 
 
 async def _require_user_id(request: Request) -> str:
@@ -251,6 +284,86 @@ async def me(request: Request) -> Dict[str, Any]:
     }
 
 
+@app.get("/billing/subscription")
+async def billing_subscription(request: Request) -> Dict[str, Any]:
+    user_id = await _require_user_id(request)
+    db: Database = request.app.state.db
+
+    sub = await fetch_subscription(db, user_id)
+    customer_id = await fetch_user_stripe_customer_id(db, user_id)
+    return {
+        "user_id": user_id,
+        "stripe_enabled": bool(config.stripe_secret_key),
+        "stripe_customer_id": customer_id,
+        "plan": sub["plan"],
+        "status": sub["status"],
+        "cancel_at_period_end": bool(sub["cancel_at_period_end"]),
+        "current_period_end": sub["current_period_end"].isoformat() if sub["current_period_end"] else None,
+    }
+
+
+@app.post("/billing/checkout")
+async def billing_checkout(request: Request, body: BillingCheckoutBody) -> Dict[str, Any]:
+    user_id = await _require_user_id(request)
+    secret_key = _require_stripe_secret_key()
+    price_id = _require_stripe_pro_price_id()
+
+    plan = body.plan.strip().lower()
+    if plan != "pro":
+        raise HTTPException(status_code=400, detail="only 'pro' is supported")
+
+    stripe.api_key = secret_key
+
+    db: Database = request.app.state.db
+    customer_id = await fetch_user_stripe_customer_id(db, user_id)
+    if not customer_id:
+        customer = await run_in_threadpool(stripe.Customer.create, metadata={"user_id": user_id})
+        customer_id = str(customer["id"])
+        await set_user_stripe_customer_id(db, user_id, customer_id)
+
+    base = _frontend_base_url()
+    session = await run_in_threadpool(
+        stripe.checkout.Session.create,
+        mode="subscription",
+        customer=customer_id,
+        line_items=[{"price": price_id, "quantity": 1}],
+        allow_promotion_codes=True,
+        client_reference_id=user_id,
+        success_url=f"{base}/dashboard/billing?checkout=success",
+        cancel_url=f"{base}/dashboard/billing?checkout=cancel",
+        subscription_data={"metadata": {"user_id": user_id, "plan": plan}},
+        metadata={"user_id": user_id, "plan": plan},
+    )
+
+    url = session.get("url")
+    if not url:
+        raise HTTPException(status_code=500, detail="stripe session missing url")
+    return {"url": url}
+
+
+@app.post("/billing/portal")
+async def billing_portal(request: Request) -> Dict[str, Any]:
+    user_id = await _require_user_id(request)
+    secret_key = _require_stripe_secret_key()
+    stripe.api_key = secret_key
+
+    db: Database = request.app.state.db
+    customer_id = await fetch_user_stripe_customer_id(db, user_id)
+    if not customer_id:
+        raise HTTPException(status_code=400, detail="no stripe customer for user")
+
+    base = _frontend_base_url()
+    session = await run_in_threadpool(
+        stripe.billing_portal.Session.create,
+        customer=customer_id,
+        return_url=f"{base}/dashboard/billing",
+    )
+    url = session.get("url")
+    if not url:
+        raise HTTPException(status_code=500, detail="stripe portal session missing url")
+    return {"url": url}
+
+
 @app.post("/subscriptions/dev/set-plan")
 async def dev_set_plan(request: Request, body: DevSetPlanBody) -> Dict[str, Any]:
     if not config.dev_admin_token:
@@ -386,8 +499,112 @@ async def webhook_discord(payload: WebhookPayload) -> Dict[str, Any]:
 
 
 @app.post("/subscriptions/stripe")
-async def webhook_stripe(payload: WebhookPayload) -> Dict[str, Any]:
-    logging.info("Received Stripe event %s of type %s", payload.id, payload.type)
+@app.post("/webhooks/stripe")
+async def webhook_stripe(request: Request) -> Dict[str, Any]:
+    secret_key = _require_stripe_secret_key()
+    webhook_secret = _require_stripe_webhook_secret()
+    pro_price_id = _require_stripe_pro_price_id()
+
+    stripe.api_key = secret_key
+
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature")
+    if not sig_header:
+        raise HTTPException(status_code=400, detail="missing stripe-signature header")
+
+    try:
+        event = stripe.Webhook.construct_event(payload=payload, sig_header=sig_header, secret=webhook_secret)
+    except stripe.error.SignatureVerificationError:
+        raise HTTPException(status_code=400, detail="invalid stripe signature") from None
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid stripe payload") from None
+
+    event_type = event.get("type")
+    data_object = (event.get("data") or {}).get("object") or {}
+
+    db: Database = request.app.state.db
+
+    async def resolve_user_id_from_customer(customer_id: Optional[str]) -> Optional[str]:
+        if not customer_id:
+            return None
+        return await fetch_user_id_by_stripe_customer_id(db, customer_id)
+
+    async def apply_subscription_update(subscription: Dict[str, Any], user_id: Optional[str]) -> None:
+        customer_id = subscription.get("customer")
+        if not user_id:
+            user_id = str(subscription.get("metadata", {}).get("user_id") or "") or None
+        if not user_id:
+            user_id = await resolve_user_id_from_customer(str(customer_id) if customer_id else None)
+        if not user_id:
+            logging.warning("Stripe webhook: cannot map subscription to user (customer=%s)", customer_id)
+            return
+
+        if customer_id:
+            existing = await fetch_user_stripe_customer_id(db, user_id)
+            if not existing:
+                await set_user_stripe_customer_id(db, user_id, str(customer_id))
+
+        status = str(subscription.get("status") or "unknown")
+        cancel_at_period_end = bool(subscription.get("cancel_at_period_end") or False)
+
+        current_period_end = None
+        cpe = subscription.get("current_period_end")
+        if isinstance(cpe, (int, float)):
+            current_period_end = datetime.fromtimestamp(cpe, tz=timezone.utc)
+
+        price_id = None
+        items = (subscription.get("items") or {}).get("data") or []
+        if items and isinstance(items, list):
+            price = (items[0] or {}).get("price") if isinstance(items[0], dict) else None
+            if isinstance(price, dict):
+                price_id = price.get("id")
+
+        plan = "free"
+        if status in {"active", "trialing"} and price_id == pro_price_id:
+            plan = "pro"
+
+        await upsert_stripe_subscription(
+            db,
+            user_id,
+            plan=plan,
+            status=status,
+            stripe_subscription_id=str(subscription.get("id") or "") or None,
+            stripe_price_id=str(price_id) if price_id else None,
+            current_period_end=current_period_end,
+            cancel_at_period_end=cancel_at_period_end,
+        )
+
+    if event_type == "checkout.session.completed":
+        if data_object.get("mode") == "subscription":
+            user_id = str(data_object.get("client_reference_id") or "") or None
+            customer_id = str(data_object.get("customer") or "") or None
+            subscription_id = str(data_object.get("subscription") or "") or None
+
+            if user_id and customer_id:
+                existing = await fetch_user_stripe_customer_id(db, user_id)
+                if not existing:
+                    await set_user_stripe_customer_id(db, user_id, customer_id)
+
+            if subscription_id:
+                subscription = await run_in_threadpool(
+                    stripe.Subscription.retrieve,
+                    subscription_id,
+                    expand=["items.data.price"],
+                )
+                await apply_subscription_update(dict(subscription), user_id)
+
+    if event_type in {"customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted"}:
+        subscription = dict(data_object)
+        if event_type != "customer.subscription.deleted" and subscription.get("id"):
+            subscription = dict(
+                await run_in_threadpool(
+                    stripe.Subscription.retrieve,
+                    str(subscription["id"]),
+                    expand=["items.data.price"],
+                )
+            )
+        await apply_subscription_update(subscription, None)
+
     return {"received": True}
 
 

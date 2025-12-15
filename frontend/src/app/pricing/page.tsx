@@ -10,10 +10,18 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { AutoStartProCheckout } from "@/components/auto-start-pro-checkout";
+import { CheckoutProButton } from "@/components/checkout-pro-button";
 
-export default function PricingPage() {
+export default function PricingPage({
+  searchParams,
+}: {
+  searchParams?: { [key: string]: string | string[] | undefined };
+}) {
+  const checkout = typeof searchParams?.checkout === "string" ? searchParams.checkout : undefined;
   return (
     <div className="flex min-h-screen flex-col">
+      <AutoStartProCheckout enabled={checkout === "pro"} />
       <header className="px-6 h-16 flex items-center border-b fixed w-full bg-background/80 backdrop-blur-sm z-50">
         <div className="max-w-7xl w-full mx-auto flex items-center justify-between">
           <Link href="/" className="flex items-center gap-2 font-bold text-xl">
@@ -55,7 +63,9 @@ export default function PricingPage() {
               </CardHeader>
               <CardContent className="flex-1 space-y-4">
                 <div className="text-3xl font-bold">$0 <span className="text-base font-normal text-muted-foreground">/mo</span></div>
-                <Button className="w-full" variant="outline">Get Started</Button>
+                <Link href={LOGIN_URL}>
+                  <Button className="w-full" variant="outline">Get Started</Button>
+                </Link>
               </CardContent>
             </Card>
 
@@ -70,7 +80,7 @@ export default function PricingPage() {
               </CardHeader>
               <CardContent className="flex-1 space-y-4">
                 <div className="text-3xl font-bold">$9 <span className="text-base font-normal text-muted-foreground">/mo</span></div>
-                <Button className="w-full" variant="secondary">Upgrade to Plus</Button>
+                <CheckoutProButton variant="secondary" label="Upgrade to Plus" redirectAfterLogin="/pricing?checkout=pro" />
               </CardContent>
             </Card>
 
@@ -82,7 +92,7 @@ export default function PricingPage() {
               </CardHeader>
               <CardContent className="flex-1 space-y-4">
                 <div className="text-3xl font-bold">$25 <span className="text-base font-normal text-muted-foreground">/mo</span></div>
-                <Button className="w-full">Upgrade to Premium</Button>
+                <CheckoutProButton label="Upgrade to Premium" redirectAfterLogin="/pricing?checkout=pro" />
               </CardContent>
             </Card>
           </div>

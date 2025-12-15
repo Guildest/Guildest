@@ -20,10 +20,9 @@ export async function GET(req: NextRequest) {
   response.cookies.set("guildest_session", token, {
     httpOnly: true,
     sameSite: "lax",
-    secure: false,
+    secure: process.env.NODE_ENV === "production",
     path: "/",
     maxAge: 60 * 60 * 24 * 7,
   });
   return response;
 }
-

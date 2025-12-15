@@ -12,6 +12,11 @@ Provides Discord OAuth login + per-guild dashboards/settings for the web fronten
   - `DISCORD_OAUTH_REDIRECT_URI` (must match your Discord application settings)
 - `FRONTEND_BASE_URL` (e.g. `http://localhost:3000`)
 
+Optional (Stripe billing):
+- `STRIPE_SECRET_KEY`
+- `STRIPE_WEBHOOK_SECRET`
+- `STRIPE_PRO_PRICE_ID`
+
 ## Auth
 
 The API accepts the session token via:
@@ -40,3 +45,9 @@ OAuth flow:
 - `GET /guilds/{guild_id}/settings`
 - `PATCH /guilds/{guild_id}/settings`
 
+## Billing (Stripe)
+
+- `GET /billing/subscription`
+- `POST /billing/checkout` (body: `{ "plan": "pro" }`)
+- `POST /billing/portal`
+- `POST /webhooks/stripe` (alias: `/subscriptions/stripe`)

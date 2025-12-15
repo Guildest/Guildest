@@ -82,6 +82,13 @@ async def init_db(db: Database) -> None:
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS stripe_customer_id TEXT;
+
+    CREATE UNIQUE INDEX IF NOT EXISTS users_stripe_customer_id_uq
+      ON users (stripe_customer_id)
+      WHERE stripe_customer_id IS NOT NULL;
+
     CREATE TABLE IF NOT EXISTS sessions (
         session_id UUID PRIMARY KEY,
         user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
@@ -93,6 +100,10 @@ async def init_db(db: Database) -> None:
         user_id TEXT PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
         plan TEXT NOT NULL DEFAULT 'free',
         status TEXT NOT NULL DEFAULT 'active',
+        stripe_subscription_id TEXT,
+        stripe_price_id TEXT,
+        current_period_end TIMESTAMPTZ,
+        cancel_at_period_end BOOLEAN NOT NULL DEFAULT FALSE,
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
@@ -136,6 +147,36 @@ async def init_db(db: Database) -> None:
     """
     async with db.pool.connection() as conn:
         await conn.execute(ddl)
+
+
+async def fetch_user_stripe_customer_id(db: Database, user_id: str) -> Optional[str]:
+    query = "SELECT stripe_customer_id FROM users WHERE user_id = %(user_id)s;"
+    async with db.pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(query, {"user_id": user_id})
+            row = await cur.fetchone()
+            return row[0] if row and row[0] else None
+
+
+async def set_user_stripe_customer_id(db: Database, user_id: str, customer_id: str) -> None:
+    query = """
+    UPDATE users
+    SET stripe_customer_id = %(customer_id)s,
+        updated_at = NOW()
+    WHERE user_id = %(user_id)s;
+    """
+    async with db.pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(query, {"user_id": user_id, "customer_id": customer_id})
+
+
+async def fetch_user_id_by_stripe_customer_id(db: Database, customer_id: str) -> Optional[str]:
+    query = "SELECT user_id FROM users WHERE stripe_customer_id = %(customer_id)s;"
+    async with db.pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(query, {"customer_id": customer_id})
+            row = await cur.fetchone()
+            return row[0] if row else None
 
 
 async def fetch_guild_settings(db: Database, guild_id: str) -> GuildSettings:
@@ -316,6 +357,80 @@ async def fetch_subscription_plan(db: Database, user_id: str) -> str:
             await cur.execute(query, {"user_id": user_id})
             row = await cur.fetchone()
             return row[0] if row else "free"
+
+
+async def fetch_subscription(db: Database, user_id: str) -> dict[str, Any]:
+    await ensure_subscription_row(db, user_id)
+    query = """
+    SELECT plan, status, stripe_subscription_id, stripe_price_id, current_period_end, cancel_at_period_end
+    FROM subscriptions
+    WHERE user_id = %(user_id)s;
+    """
+    async with db.pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(query, {"user_id": user_id})
+            row = await cur.fetchone()
+            if not row:
+                return {
+                    "plan": "free",
+                    "status": "active",
+                    "stripe_subscription_id": None,
+                    "stripe_price_id": None,
+                    "current_period_end": None,
+                    "cancel_at_period_end": False,
+                }
+            return {
+                "plan": row[0],
+                "status": row[1],
+                "stripe_subscription_id": row[2],
+                "stripe_price_id": row[3],
+                "current_period_end": row[4],
+                "cancel_at_period_end": row[5],
+            }
+
+
+async def upsert_stripe_subscription(
+    db: Database,
+    user_id: str,
+    *,
+    plan: str,
+    status: str,
+    stripe_subscription_id: Optional[str],
+    stripe_price_id: Optional[str],
+    current_period_end: Optional[datetime],
+    cancel_at_period_end: bool,
+) -> None:
+    await ensure_subscription_row(db, user_id)
+    query = """
+    INSERT INTO subscriptions (
+        user_id, plan, status, stripe_subscription_id, stripe_price_id, current_period_end, cancel_at_period_end, updated_at
+    )
+    VALUES (
+        %(user_id)s, %(plan)s, %(status)s, %(stripe_subscription_id)s, %(stripe_price_id)s, %(current_period_end)s, %(cancel_at_period_end)s, NOW()
+    )
+    ON CONFLICT (user_id) DO UPDATE
+      SET plan = EXCLUDED.plan,
+          status = EXCLUDED.status,
+          stripe_subscription_id = EXCLUDED.stripe_subscription_id,
+          stripe_price_id = EXCLUDED.stripe_price_id,
+          current_period_end = EXCLUDED.current_period_end,
+          cancel_at_period_end = EXCLUDED.cancel_at_period_end,
+          updated_at = NOW();
+    """
+    async with db.pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                query,
+                {
+                    "user_id": user_id,
+                    "plan": plan,
+                    "status": status,
+                    "stripe_subscription_id": stripe_subscription_id,
+                    "stripe_price_id": stripe_price_id,
+                    "current_period_end": current_period_end,
+                    "cancel_at_period_end": cancel_at_period_end,
+                },
+            )
 
 
 async def create_session(db: Database, user_id: str, ttl_days: int = 7) -> tuple[str, datetime]:

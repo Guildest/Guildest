@@ -42,6 +42,9 @@ class AppConfig:
     openrouter_api_key: Optional[str] = None
     openrouter_model: str = "deepseek/deepseek-v3.2"
     dev_admin_token: Optional[str] = None
+    stripe_secret_key: Optional[str] = None
+    stripe_webhook_secret: Optional[str] = None
+    stripe_pro_price_id: Optional[str] = None
     redis: RedisConfig = field(default_factory=RedisConfig)
     queue: QueueConfig = field(default_factory=QueueConfig)
 
@@ -69,6 +72,9 @@ def load_app_config() -> AppConfig:
         openrouter_api_key=os.getenv("OPENROUTER_API_KEY"),
         openrouter_model=os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-v3.2").strip(),
         dev_admin_token=os.getenv("DEV_ADMIN_TOKEN"),
+        stripe_secret_key=os.getenv("STRIPE_SECRET_KEY"),
+        stripe_webhook_secret=os.getenv("STRIPE_WEBHOOK_SECRET"),
+        stripe_pro_price_id=os.getenv("STRIPE_PRO_PRICE_ID"),
         redis=RedisConfig(url=redis_url),
         queue=QueueConfig(
             stream=queue_stream,

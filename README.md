@@ -62,3 +62,8 @@ Also required for Discord OAuth login:
 - `DISCORD_CLIENT_ID`
 - `DISCORD_CLIENT_SECRET`
 - `DISCORD_OAUTH_REDIRECT_URI`
+
+Optional (Stripe billing):
+- `STRIPE_SECRET_KEY`
+- `STRIPE_WEBHOOK_SECRET`
+- `STRIPE_PRO_PRICE_ID`
