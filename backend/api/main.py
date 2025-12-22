@@ -121,10 +121,18 @@ def _require_stripe_webhook_secret() -> str:
     return config.stripe_webhook_secret
 
 
-def _require_stripe_pro_price_id() -> str:
-    if not config.stripe_pro_price_id:
-        raise HTTPException(status_code=500, detail="STRIPE_PRO_PRICE_ID is not configured")
-    return config.stripe_pro_price_id
+def _get_stripe_price_id(plan: str) -> str:
+    """Get the Stripe price ID for the given plan tier."""
+    if plan == "plus":
+        if not config.stripe_plus_price_id:
+            raise HTTPException(status_code=500, detail="STRIPE_PLUS_PRICE_ID is not configured")
+        return config.stripe_plus_price_id
+    elif plan == "premium":
+        if not config.stripe_premium_price_id:
+            raise HTTPException(status_code=500, detail="STRIPE_PREMIUM_PRICE_ID is not configured")
+        return config.stripe_premium_price_id
+    else:
+        raise HTTPException(status_code=400, detail=f"Invalid plan: {plan}")
 
 
 def _frontend_base_url() -> str:
@@ -306,11 +314,12 @@ async def billing_subscription(request: Request) -> Dict[str, Any]:
 async def billing_checkout(request: Request, body: BillingCheckoutBody) -> Dict[str, Any]:
     user_id = await _require_user_id(request)
     secret_key = _require_stripe_secret_key()
-    price_id = _require_stripe_pro_price_id()
 
     plan = body.plan.strip().lower()
-    if plan != "pro":
-        raise HTTPException(status_code=400, detail="only 'pro' is supported")
+    if plan not in {"plus", "premium"}:
+        raise HTTPException(status_code=400, detail="plan must be 'plus' or 'premium'")
+
+    price_id = _get_stripe_price_id(plan)
 
     stripe.api_key = secret_key
 
@@ -376,8 +385,8 @@ async def dev_set_plan(request: Request, body: DevSetPlanBody) -> Dict[str, Any]
     user_id = await _require_user_id(request)
     db: Database = request.app.state.db
     plan = body.plan.strip().lower()
-    if plan not in {"free", "pro"}:
-        raise HTTPException(status_code=400, detail="plan must be 'free' or 'pro'")
+    if plan not in {"free", "plus", "premium"}:
+        raise HTTPException(status_code=400, detail="plan must be 'free', 'plus', or 'premium'")
 
     await set_subscription_plan(db, user_id, plan=plan)
     return {"ok": True, "user_id": user_id, "plan": plan}
@@ -503,7 +512,6 @@ async def webhook_discord(payload: WebhookPayload) -> Dict[str, Any]:
 async def webhook_stripe(request: Request) -> Dict[str, Any]:
     secret_key = _require_stripe_secret_key()
     webhook_secret = _require_stripe_webhook_secret()
-    pro_price_id = _require_stripe_pro_price_id()
 
     stripe.api_key = secret_key
 
@@ -560,8 +568,11 @@ async def webhook_stripe(request: Request) -> Dict[str, Any]:
                 price_id = price.get("id")
 
         plan = "free"
-        if status in {"active", "trialing"} and price_id == pro_price_id:
-            plan = "pro"
+        if status in {"active", "trialing"}:
+            if price_id == config.stripe_plus_price_id:
+                plan = "plus"
+            elif price_id == config.stripe_premium_price_id:
+                plan = "premium"
 
         await upsert_stripe_subscription(
             db,

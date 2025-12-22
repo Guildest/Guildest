@@ -2,7 +2,7 @@ const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 export interface User {
   user_id: string;
-  plan: "free" | "pro";
+  plan: "free" | "plus" | "premium";
   guilds: Guild[];
 }
 
@@ -93,7 +93,7 @@ export function buildLoginUrl(redirectPath: string = "/dashboard"): string {
   return `${LOGIN_URL}?${qs.toString()}`;
 }
 
-export async function createBillingCheckoutUrl(plan: "pro" = "pro"): Promise<string> {
+export async function createBillingCheckoutUrl(plan: "plus" | "premium" = "plus"): Promise<string> {
   const res = await fetch(`${API_BASE_URL}/billing/checkout`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

@@ -5,10 +5,11 @@ import { buildLoginUrl, createBillingCheckoutUrl } from "@/lib/api";
 
 type Props = {
   enabled: boolean;
+  plan?: "plus" | "premium";
   redirectAfterLogin?: string;
 };
 
-export function AutoStartProCheckout({ enabled, redirectAfterLogin = "/pricing?checkout=pro" }: Props) {
+export function AutoStartProCheckout({ enabled, plan = "plus", redirectAfterLogin }: Props) {
   const started = useRef(false);
 
   useEffect(() => {
@@ -17,18 +18,19 @@ export function AutoStartProCheckout({ enabled, redirectAfterLogin = "/pricing?c
 
     (async () => {
       try {
-        const url = await createBillingCheckoutUrl("pro");
+        const url = await createBillingCheckoutUrl(plan);
         window.location.href = url;
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         if (message === "unauthenticated") {
-          window.location.href = buildLoginUrl(redirectAfterLogin);
+          const redirect = redirectAfterLogin || `/pricing?checkout=${plan}`;
+          window.location.href = buildLoginUrl(redirect);
           return;
         }
         alert(message);
       }
     })();
-  }, [enabled, redirectAfterLogin]);
+  }, [enabled, plan, redirectAfterLogin]);
 
   return null;
 }

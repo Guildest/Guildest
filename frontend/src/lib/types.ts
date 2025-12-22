@@ -9,13 +9,13 @@ export type GuildSummary = {
 
 export type MeResponse = {
   user_id: string;
-  plan: "free" | "pro" | string;
+  plan: "free" | "plus" | "premium" | string;
   guilds: GuildSummary[];
 };
 
 export type DashboardOverview = {
   guild_id: string;
-  plan: "free" | "pro" | string;
+  plan: "free" | "plus" | "premium" | string;
   features: {
     moderation_logs: boolean;
     sentiment_reports: boolean;

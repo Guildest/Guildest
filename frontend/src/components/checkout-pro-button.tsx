@@ -5,14 +5,16 @@ import { Button } from "@/components/ui/button";
 import { buildLoginUrl, createBillingCheckoutUrl } from "@/lib/api";
 
 type Props = {
+  plan?: "plus" | "premium";
   redirectAfterLogin?: string;
   label?: string;
   variant?: "default" | "secondary" | "outline" | "ghost";
 };
 
 export function CheckoutProButton({
-  redirectAfterLogin = "/pricing?checkout=pro",
-  label = "Upgrade to Pro",
+  plan = "plus",
+  redirectAfterLogin = "/pricing?checkout=plus",
+  label = "Upgrade to Plus",
   variant = "default",
 }: Props) {
   const [loading, setLoading] = useState(false);
@@ -20,7 +22,7 @@ export function CheckoutProButton({
   async function onClick() {
     try {
       setLoading(true);
-      const url = await createBillingCheckoutUrl("pro");
+      const url = await createBillingCheckoutUrl(plan);
       window.location.href = url;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
