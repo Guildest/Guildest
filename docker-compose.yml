@@ -39,6 +39,7 @@ services:
       QUEUE_STREAM: guildest:events
       QUEUE_MAX_LENGTH: 5000
       SESSION_SECRET: ${SESSION_SECRET:-dev-secret-change-me}
+      DEV_ADMIN_TOKEN: ${DEV_ADMIN_TOKEN:-local-dev-token}
       FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-http://localhost:3000}
       DISCORD_TOKEN: ${DISCORD_TOKEN:-}
       DISCORD_CLIENT_ID: ${DISCORD_CLIENT_ID:-}
@@ -98,6 +99,7 @@ services:
     command: ["python", "-m", "backend.workers.moderation.main"]
     environment:
       LOG_LEVEL: INFO
+      DISCORD_CLIENT_ID: ${DISCORD_CLIENT_ID:-}
       REDIS_URL: redis://redis:6379/0
       QUEUE_STREAM: guildest:events
       QUEUE_MAX_LENGTH: 5000

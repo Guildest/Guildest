@@ -65,8 +65,36 @@ async def init_db(db: Database) -> None:
         author_id TEXT,
         action TEXT,
         reason TEXT,
+        actor_id TEXT,
+        actor_type TEXT,
+        target_id TEXT,
+        bot_id TEXT,
+        source TEXT,
+        metadata JSONB,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+
+    ALTER TABLE moderation_logs
+      ADD COLUMN IF NOT EXISTS actor_id TEXT;
+    ALTER TABLE moderation_logs
+      ADD COLUMN IF NOT EXISTS actor_type TEXT;
+    ALTER TABLE moderation_logs
+      ADD COLUMN IF NOT EXISTS target_id TEXT;
+    ALTER TABLE moderation_logs
+      ADD COLUMN IF NOT EXISTS bot_id TEXT;
+    ALTER TABLE moderation_logs
+      ADD COLUMN IF NOT EXISTS source TEXT;
+    ALTER TABLE moderation_logs
+      ADD COLUMN IF NOT EXISTS metadata JSONB;
+
+    CREATE INDEX IF NOT EXISTS moderation_logs_guild_created_idx
+      ON moderation_logs (guild_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS moderation_logs_actor_idx
+      ON moderation_logs (actor_id);
+    CREATE INDEX IF NOT EXISTS moderation_logs_action_idx
+      ON moderation_logs (action);
+    CREATE INDEX IF NOT EXISTS moderation_logs_source_idx
+      ON moderation_logs (source);
 
     CREATE TABLE IF NOT EXISTS analytics_message_counts (
         time_bucket TIMESTAMPTZ NOT NULL,
@@ -365,26 +393,101 @@ async def upsert_guild_settings(db: Database, settings: GuildSettings) -> GuildS
             )
 
 
-async def log_moderation_event(
-    db: Database, message: QueueMessage, action: str, reason: Optional[str] = None
+async def log_moderation_action(
+    db: Database,
+    *,
+    guild_id: str,
+    action: str,
+    reason: Optional[str] = None,
+    message_id: Optional[str] = None,
+    channel_id: Optional[str] = None,
+    author_id: Optional[str] = None,
+    actor_id: Optional[str] = None,
+    actor_type: Optional[str] = None,
+    target_id: Optional[str] = None,
+    bot_id: Optional[str] = None,
+    source: Optional[str] = None,
+    metadata: Optional[dict[str, Any]] = None,
 ) -> None:
     query = """
-    INSERT INTO moderation_logs (message_id, guild_id, channel_id, author_id, action, reason)
-    VALUES (%(message_id)s, %(guild_id)s, %(channel_id)s, %(author_id)s, %(action)s, %(reason)s);
+    INSERT INTO moderation_logs (
+        message_id,
+        guild_id,
+        channel_id,
+        author_id,
+        action,
+        reason,
+        actor_id,
+        actor_type,
+        target_id,
+        bot_id,
+        source,
+        metadata
+    )
+    VALUES (
+        %(message_id)s,
+        %(guild_id)s,
+        %(channel_id)s,
+        %(author_id)s,
+        %(action)s,
+        %(reason)s,
+        %(actor_id)s,
+        %(actor_type)s,
+        %(target_id)s,
+        %(bot_id)s,
+        %(source)s,
+        %(metadata)s::jsonb
+    );
     """
+    metadata_json = json.dumps(metadata) if metadata is not None else None
     async with db.pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 query,
                 {
-                    "message_id": message.message_id,
-                    "guild_id": message.guild_id,
-                    "channel_id": message.channel_id,
-                    "author_id": message.author_id,
+                    "message_id": message_id,
+                    "guild_id": guild_id,
+                    "channel_id": channel_id,
+                    "author_id": author_id,
                     "action": action,
                     "reason": reason,
+                    "actor_id": actor_id,
+                    "actor_type": actor_type,
+                    "target_id": target_id,
+                    "bot_id": bot_id,
+                    "source": source,
+                    "metadata": metadata_json,
                 },
             )
+
+
+async def log_moderation_event(
+    db: Database,
+    message: QueueMessage,
+    action: str,
+    reason: Optional[str] = None,
+    *,
+    actor_id: Optional[str] = None,
+    actor_type: Optional[str] = None,
+    bot_id: Optional[str] = None,
+    source: Optional[str] = None,
+    metadata: Optional[dict[str, Any]] = None,
+) -> None:
+    await log_moderation_action(
+        db,
+        guild_id=message.guild_id,
+        action=action,
+        reason=reason,
+        message_id=message.message_id,
+        channel_id=message.channel_id,
+        author_id=message.author_id,
+        actor_id=actor_id,
+        actor_type=actor_type,
+        target_id=message.author_id,
+        bot_id=bot_id,
+        source=source,
+        metadata=metadata,
+    )
 
 
 async def insert_guild_warn(
@@ -1145,11 +1248,88 @@ async def fetch_sentiment_daily(
             ]
 
 
-async def fetch_moderation_logs(db: Database, guild_id: str, limit: int = 200) -> list[dict[str, Any]]:
-    query = """
-    SELECT id, message_id, channel_id, author_id, action, reason, created_at
+async def fetch_moderation_logs(
+    db: Database,
+    guild_id: str,
+    limit: int = 200,
+    *,
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+    action: Optional[str] = None,
+    action_in: Optional[list[str]] = None,
+    action_not_in: Optional[list[str]] = None,
+    actor_type: Optional[str] = None,
+    actor_id: Optional[str] = None,
+    target_id: Optional[str] = None,
+    bot_id: Optional[str] = None,
+    source: Optional[str] = None,
+    search: Optional[str] = None,
+) -> list[dict[str, Any]]:
+    conditions = ["guild_id = %(guild_id)s"]
+    params: dict[str, Any] = {"guild_id": guild_id, "limit": limit}
+
+    if start:
+        conditions.append("created_at >= %(start)s")
+        params["start"] = start
+    if end:
+        conditions.append("created_at <= %(end)s")
+        params["end"] = end
+    if action:
+        conditions.append("action = %(action)s")
+        params["action"] = action
+    if action_in:
+        conditions.append("action = ANY(%(action_in)s)")
+        params["action_in"] = action_in
+    if action_not_in:
+        conditions.append("(action IS NULL OR action <> ALL(%(action_not_in)s))")
+        params["action_not_in"] = action_not_in
+    if actor_type:
+        conditions.append("actor_type = %(actor_type)s")
+        params["actor_type"] = actor_type
+    if actor_id:
+        conditions.append("actor_id = %(actor_id)s")
+        params["actor_id"] = actor_id
+    if target_id:
+        conditions.append("(target_id = %(target_id)s OR author_id = %(target_id)s)")
+        params["target_id"] = target_id
+    if bot_id:
+        conditions.append("bot_id = %(bot_id)s")
+        params["bot_id"] = bot_id
+    if source:
+        conditions.append("source = %(source)s")
+        params["source"] = source
+    if search:
+        conditions.append(
+            "("
+            "action ILIKE %(search)s OR "
+            "reason ILIKE %(search)s OR "
+            "actor_id ILIKE %(search)s OR "
+            "target_id ILIKE %(search)s OR "
+            "author_id ILIKE %(search)s OR "
+            "message_id ILIKE %(search)s OR "
+            "channel_id ILIKE %(search)s OR "
+            "source ILIKE %(search)s OR "
+            "metadata::text ILIKE %(search)s"
+            ")"
+        )
+        params["search"] = f"%{search}%"
+
+    query = f"""
+    SELECT id,
+           message_id,
+           channel_id,
+           author_id,
+           action,
+           reason,
+           actor_id,
+           actor_type,
+           target_id,
+           bot_id,
+           source,
+           metadata,
+           created_at
     FROM moderation_logs
-    WHERE guild_id = %(guild_id)s
+    WHERE {' AND '.join(conditions)}
     ORDER BY id DESC
     LIMIT %(limit)s;
     """
@@ -1157,18 +1337,32 @@ async def fetch_moderation_logs(db: Database, guild_id: str, limit: int = 200) -
         async with conn.cursor() as cur:
             await cur.execute(query, {"guild_id": guild_id, "limit": limit})
             rows = await cur.fetchall()
-            return [
-                {
-                    "id": int(row[0]),
-                    "message_id": row[1],
-                    "channel_id": row[2],
-                    "author_id": row[3],
-                    "action": row[4],
-                    "reason": row[5],
-                    "created_at": row[6].isoformat(),
-                }
-                for row in rows
-            ]
+            items: list[dict[str, Any]] = []
+            for row in rows:
+                metadata = row[11]
+                if isinstance(metadata, str):
+                    try:
+                        metadata = json.loads(metadata)
+                    except json.JSONDecodeError:
+                        metadata = {"raw": metadata}
+                items.append(
+                    {
+                        "id": int(row[0]),
+                        "message_id": row[1],
+                        "channel_id": row[2],
+                        "author_id": row[3],
+                        "action": row[4],
+                        "reason": row[5],
+                        "actor_id": row[6],
+                        "actor_type": row[7],
+                        "target_id": row[8],
+                        "bot_id": row[9],
+                        "source": row[10],
+                        "metadata": metadata,
+                        "created_at": row[12].isoformat(),
+                    }
+                )
+            return items
 
 
 async def fetch_recent_moderation_count(db: Database, guild_id: str, since: datetime) -> int:

@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -24,11 +25,10 @@ from backend.api.auth import (
 )
 from backend.api.discord_oauth import build_authorize_url, exchange_code_for_token, fetch_me, fetch_my_guilds
 from backend.common.config import load_app_config
-from backend.common.discord_rest import unban_member
+from backend.common.discord_rest import bot_in_guild, fetch_user, unban_member
 from backend.common.logging import configure_logging
 from backend.common.openrouter import chat_completion
 from backend.common.models import GuildSettings
-from backend.common.discord_rest import bot_in_guild
 from backend.database.db import (
     Database,
     connect_guild_to_user,
@@ -147,6 +147,105 @@ def _require_openrouter_key() -> str:
         raise HTTPException(status_code=404, detail="openrouter not enabled")
     return config.openrouter_api_key
 
+
+def _parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid datetime format") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _moderation_action_filters(action_type: Optional[str]) -> dict[str, Any]:
+    if not action_type:
+        return {}
+    normalized = action_type.strip().lower()
+    known_actions = {
+        "ban",
+        "unban",
+        "kick",
+        "timeout",
+        "warn",
+        "warn_clear",
+        "delete",
+        "message_delete",
+        "role_change",
+        "role_update",
+        "config_change",
+        "setting_change",
+        "reviewed",
+        "flagged",
+    }
+    if normalized == "ban":
+        return {"action_in": ["ban"]}
+    if normalized == "unban":
+        return {"action_in": ["unban"]}
+    if normalized == "kick":
+        return {"action_in": ["kick"]}
+    if normalized == "timeout":
+        return {"action_in": ["timeout"]}
+    if normalized == "warn":
+        return {"action_in": ["warn", "warn_clear"]}
+    if normalized in {"message delete", "message_delete"}:
+        return {"action_in": ["delete", "message_delete"]}
+    if normalized in {"role change", "role_change"}:
+        return {"action_in": ["role_change", "role_update"]}
+    if normalized in {"automod trigger", "automod"}:
+        return {"source": "automod"}
+    if normalized in {"config change", "config"}:
+        return {"action_in": ["config_change", "setting_change"]}
+    if normalized == "review":
+        return {"action_in": ["reviewed"]}
+    if normalized == "other":
+        return {"action_not_in": sorted(known_actions)}
+    return {"action_in": [normalized]}
+
+
+def _user_fields_for_search(user: dict[str, Any]) -> list[str]:
+    return [
+        str(user.get("id") or ""),
+        str(user.get("username") or ""),
+        str(user.get("global_name") or ""),
+        str(user.get("discriminator") or ""),
+    ]
+
+
+def _log_matches_search(
+    log: dict[str, Any],
+    tokens: list[str],
+    user_map: dict[str, dict[str, Any]],
+) -> bool:
+    metadata = log.get("metadata")
+    metadata_text = ""
+    if metadata is not None:
+        try:
+            metadata_text = json.dumps(metadata)
+        except TypeError:
+            metadata_text = str(metadata)
+
+    haystack_parts = [
+        log.get("action"),
+        log.get("reason"),
+        log.get("actor_id"),
+        log.get("target_id"),
+        log.get("author_id"),
+        log.get("message_id"),
+        log.get("channel_id"),
+        log.get("source"),
+        metadata_text,
+    ]
+
+    for key in ("actor_id", "target_id", "author_id", "bot_id"):
+        user_id = log.get(key)
+        if user_id and user_id in user_map:
+            haystack_parts.extend(_user_fields_for_search(user_map[user_id]))
+
+    haystack = " ".join(part for part in haystack_parts if part).lower()
+    return all(token in haystack for token in tokens)
 
 def _connected_guild_limit(plan: str) -> int:
     normalized = plan.strip().lower()
@@ -748,7 +847,22 @@ async def sentiment_report(guild_id: str, request: Request, day: Optional[str] =
 
 
 @app.get("/guilds/{guild_id}/moderation/logs")
-async def moderation_logs(guild_id: str, request: Request, limit: int = 200) -> Dict[str, Any]:
+async def moderation_logs(
+    guild_id: str,
+    request: Request,
+    limit: int = 200,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    action_type: Optional[str] = None,
+    action: Optional[str] = None,
+    actor_type: Optional[str] = None,
+    actor_id: Optional[str] = None,
+    target_id: Optional[str] = None,
+    bot_id: Optional[str] = None,
+    source: Optional[str] = None,
+    search: Optional[str] = None,
+    include_users: bool = False,
+) -> Dict[str, Any]:
     await _require_guild_access(request, guild_id)
     db: Database = request.app.state.db
     settings = await fetch_guild_settings(db, guild_id)
@@ -759,8 +873,71 @@ async def moderation_logs(guild_id: str, request: Request, limit: int = 200) -> 
         raise HTTPException(status_code=402, detail="moderation log history requires a paid plan")
 
     limit = max(1, min(limit, _moderation_logs_limit(plan)))
-    rows = await fetch_moderation_logs(db, guild_id, limit=limit)
-    return {"guild_id": guild_id, "items": rows}
+    if actor_type:
+        normalized_actor = actor_type.strip().lower()
+        if normalized_actor not in {"human", "bot", "system"}:
+            raise HTTPException(status_code=400, detail="actor_type must be human, bot, or system")
+        actor_type = normalized_actor
+
+    start_dt = _parse_iso_datetime(start)
+    end_dt = _parse_iso_datetime(end)
+    action_filters = _moderation_action_filters(action_type)
+
+    search_db = None if include_users else search
+    rows = await fetch_moderation_logs(
+        db,
+        guild_id,
+        limit=limit,
+        start=start_dt,
+        end=end_dt,
+        action=action,
+        action_in=action_filters.get("action_in"),
+        action_not_in=action_filters.get("action_not_in"),
+        actor_type=actor_type,
+        actor_id=actor_id,
+        target_id=target_id,
+        bot_id=bot_id,
+        source=source or action_filters.get("source"),
+        search=search_db,
+    )
+
+    user_map: dict[str, dict[str, Any]] = {}
+    if include_users and config.discord_token:
+        user_ids: set[str] = set()
+        for log in rows:
+            for key in ("actor_id", "target_id", "author_id", "bot_id"):
+                value = log.get(key)
+                if value:
+                    user_ids.add(str(value))
+
+        semaphore = asyncio.Semaphore(6)
+
+        async def _fetch_one(user_id: str) -> None:
+            async with semaphore:
+                try:
+                    payload = await fetch_user(bot_token=config.discord_token, user_id=user_id)
+                except Exception:  # noqa: BLE001
+                    return
+                user_map[user_id] = {
+                    "id": str(payload.get("id") or user_id),
+                    "username": payload.get("username"),
+                    "global_name": payload.get("global_name"),
+                    "discriminator": payload.get("discriminator"),
+                    "avatar": payload.get("avatar"),
+                    "bot": payload.get("bot"),
+                }
+
+        await asyncio.gather(*[_fetch_one(user_id) for user_id in user_ids])
+
+    if search:
+        tokens = [token.lower() for token in search.split() if token.strip()]
+        if tokens:
+            rows = [log for log in rows if _log_matches_search(log, tokens, user_map)]
+
+    payload: Dict[str, Any] = {"guild_id": guild_id, "items": rows}
+    if include_users:
+        payload["users"] = user_map
+    return payload
 
 
 @app.post("/webhooks/discord")

@@ -31,6 +31,7 @@ from backend.database.db import (
     init_db,
     is_appeal_blocked,
     clear_warns,
+    log_moderation_action,
     record_ban_action,
 )
 
@@ -106,6 +107,35 @@ async def build_bot(config: GatewayConfig) -> hikari.GatewayBot:
             if warn_count >= item["threshold"]:
                 selected = item
         return selected
+
+    async def _log_action(
+        *,
+        guild_id: str,
+        action: str,
+        target_id: Optional[str],
+        reason: Optional[str] = None,
+        actor_id: Optional[str] = None,
+        actor_type: Optional[str] = None,
+        source: Optional[str] = None,
+        channel_id: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> None:
+        if not db:
+            return
+        await log_moderation_action(
+            db,
+            guild_id=guild_id,
+            action=action,
+            reason=reason,
+            channel_id=channel_id,
+            author_id=target_id,
+            actor_id=actor_id,
+            actor_type=actor_type,
+            target_id=target_id,
+            bot_id=config.discord_application_id,
+            source=source,
+            metadata=metadata,
+        )
 
     async def _send_ban_dm(
         *,
@@ -371,6 +401,16 @@ async def build_bot(config: GatewayConfig) -> hikari.GatewayBot:
 
                 if name == "warn-clear":
                     cleared = await clear_warns(db, guild_id, user_id)
+                    await _log_action(
+                        guild_id=guild_id,
+                        action="warn_clear",
+                        target_id=user_id,
+                        actor_id=str(interaction.user.id),
+                        actor_type="human",
+                        source="command",
+                        channel_id=str(interaction.channel_id) if interaction.channel_id else None,
+                        metadata={"cleared": cleared},
+                    )
                     await respond_embed(
                         title="Warnings cleared",
                         description=f"Cleared {cleared} warning(s) for {_format_user(user_id, user)}.",
@@ -406,6 +446,17 @@ async def build_bot(config: GatewayConfig) -> hikari.GatewayBot:
                             communication_disabled_until=until.isoformat(),
                             reason=f"Warn threshold reached ({warn_count})",
                         )
+                        await _log_action(
+                            guild_id=guild_id,
+                            action="timeout",
+                            target_id=user_id,
+                            actor_id=config.discord_application_id,
+                            actor_type="bot" if config.discord_application_id else "system",
+                            source="automod",
+                            channel_id=str(interaction.channel_id) if interaction.channel_id else None,
+                            reason="Warn threshold reached",
+                            metadata={"warn_count": warn_count, "duration_hours": duration_hours},
+                        )
                         action_note = f"Auto-timeout applied ({duration_hours}h)."
                     elif action["action"] == "ban":
                         await ban_member(
@@ -423,7 +474,30 @@ async def build_bot(config: GatewayConfig) -> hikari.GatewayBot:
                             reason="Warn threshold reached",
                         )
                         await _send_ban_dm(user_id=user_id, guild_id=guild_id, reason="Warn threshold reached")
+                        await _log_action(
+                            guild_id=guild_id,
+                            action="ban",
+                            target_id=user_id,
+                            actor_id=config.discord_application_id,
+                            actor_type="bot" if config.discord_application_id else "system",
+                            source="automod",
+                            channel_id=str(interaction.channel_id) if interaction.channel_id else None,
+                            reason="Warn threshold reached",
+                            metadata={"warn_count": warn_count},
+                        )
                         action_note = "Auto-ban applied."
+
+                await _log_action(
+                    guild_id=guild_id,
+                    action="warn",
+                    target_id=user_id,
+                    actor_id=str(interaction.user.id),
+                    actor_type="human",
+                    source="command",
+                    channel_id=str(interaction.channel_id) if interaction.channel_id else None,
+                    reason=reason,
+                    metadata={"warn_count": warn_count},
+                )
 
                 description = f"{_format_user(user_id, user)} now has {warn_count} warning(s)."
                 if reason:
@@ -464,6 +538,17 @@ async def build_bot(config: GatewayConfig) -> hikari.GatewayBot:
                     communication_disabled_until=until.isoformat(),
                     reason=reason,
                 )
+                await _log_action(
+                    guild_id=guild_id,
+                    action="timeout",
+                    target_id=user_id,
+                    actor_id=str(interaction.user.id),
+                    actor_type="human",
+                    source="command",
+                    channel_id=str(interaction.channel_id) if interaction.channel_id else None,
+                    reason=reason,
+                    metadata={"duration_minutes": minutes_value},
+                )
                 description = f"Timed out {_format_user(user_id, user)} for {minutes_value} minutes."
                 if reason:
                     description += f"\nReason: {reason}"
@@ -488,6 +573,16 @@ async def build_bot(config: GatewayConfig) -> hikari.GatewayBot:
                     bot_token=config.discord_token,
                     guild_id=guild_id,
                     user_id=user_id,
+                    reason=reason,
+                )
+                await _log_action(
+                    guild_id=guild_id,
+                    action="ban",
+                    target_id=user_id,
+                    actor_id=str(interaction.user.id),
+                    actor_type="human",
+                    source="command",
+                    channel_id=str(interaction.channel_id) if interaction.channel_id else None,
                     reason=reason,
                 )
                 await record_ban_action(
@@ -526,6 +621,15 @@ async def build_bot(config: GatewayConfig) -> hikari.GatewayBot:
                     bot_token=config.discord_token,
                     guild_id=guild_id,
                     user_id=user_id,
+                )
+                await _log_action(
+                    guild_id=guild_id,
+                    action="unban",
+                    target_id=user_id,
+                    actor_id=str(interaction.user.id),
+                    actor_type="human",
+                    source="command",
+                    channel_id=str(interaction.channel_id) if interaction.channel_id else None,
                 )
                 await respond_embed(title="User unbanned", description=f"Unbanned <@{user_id}>.", color=0x22C55E)
                 return

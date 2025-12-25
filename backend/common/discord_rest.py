@@ -18,6 +18,14 @@ async def bot_in_guild(*, bot_token: str, guild_id: str, timeout_seconds: float 
         return True
 
 
+async def fetch_user(*, bot_token: str, user_id: str, timeout_seconds: float = 15) -> dict[str, Any]:
+    headers = {"Authorization": f"Bot {bot_token}"}
+    async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+        response = await client.get(f"{DISCORD_API_BASE}/users/{user_id}", headers=headers)
+        response.raise_for_status()
+        return response.json()
+
+
 async def ban_member(
     *,
     bot_token: str,

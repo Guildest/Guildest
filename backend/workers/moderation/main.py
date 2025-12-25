@@ -5,7 +5,7 @@ from typing import Optional
 
 from backend.common.config import AppConfig
 from backend.common.models import QueueMessage
-from backend.database.db import Database, fetch_guild_plan, fetch_guild_settings, log_moderation_event
+from backend.database.db import Database, fetch_guild_plan, fetch_guild_settings, log_moderation_action
 from backend.workers.consumer import run_worker
 
 
@@ -57,7 +57,7 @@ def _decide_action(message: QueueMessage) -> tuple[str, str]:
     return "reviewed", "heuristic checks"
 
 
-async def handle_message(message: QueueMessage, _: AppConfig, db: Optional[Database]) -> None:
+async def handle_message(message: QueueMessage, config: AppConfig, db: Optional[Database]) -> None:
     if not db:
         return
 
@@ -69,7 +69,23 @@ async def handle_message(message: QueueMessage, _: AppConfig, db: Optional[Datab
 
     plan = await _guild_plan(db, message.guild_id)
     if plan in {"plus", "premium"}:
-        await log_moderation_event(db, message, action=action, reason=reason)
+        bot_id = config.discord_client_id
+        actor_type = "bot" if bot_id else "system"
+        await log_moderation_action(
+            db,
+            guild_id=message.guild_id,
+            action=action,
+            reason=reason,
+            message_id=message.message_id,
+            channel_id=message.channel_id,
+            author_id=message.author_id,
+            actor_id=bot_id,
+            actor_type=actor_type,
+            target_id=message.author_id,
+            bot_id=bot_id,
+            source="automod",
+            metadata={"message_content": message.content} if message.content else None,
+        )
         logging.debug("[moderation] logged moderation event for message %s", message.message_id)
 
 

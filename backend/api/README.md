@@ -48,6 +48,7 @@ OAuth flow:
 - `GET /guilds/{guild_id}/sentiment/daily?days=30`
 - `GET /guilds/{guild_id}/sentiment/report?day=YYYY-MM-DD` (Plus/Premium)
 - `GET /guilds/{guild_id}/moderation/logs?limit=200` (Plus/Premium)
+  - Optional filters: `start`, `end` (ISO), `action_type`, `actor_type`, `actor_id`, `target_id`, `bot_id`, `source`, `search`, `include_users=true` (requires `DISCORD_TOKEN`)
 
 ## Settings
 

@@ -50,12 +50,31 @@ export type ModerationLogItem = {
   message_id: string | null;
   channel_id: string | null;
   author_id: string | null;
+  actor_id?: string | null;
+  actor_type?: string | null;
+  target_id?: string | null;
+  bot_id?: string | null;
+  source?: string | null;
+  metadata?: Record<string, unknown> | null;
   action: string | null;
   reason: string | null;
   created_at: string;
 };
 
-export type ModerationLogsResponse = { guild_id: string; items: ModerationLogItem[] };
+export type ModerationLogUser = {
+  id: string;
+  username?: string | null;
+  global_name?: string | null;
+  discriminator?: string | null;
+  avatar?: string | null;
+  bot?: boolean | null;
+};
+
+export type ModerationLogsResponse = {
+  guild_id: string;
+  items: ModerationLogItem[];
+  users?: Record<string, ModerationLogUser>;
+};
 
 export type AppealItem = {
   id: string;

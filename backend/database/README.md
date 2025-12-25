@@ -4,7 +4,7 @@ Postgres schema for settings, moderation logs, and analytics rollups.
 
 ## Tables
 - `guild_settings (guild_id PK, prefix, moderation_enabled, analytics_enabled, sentiment_enabled, warn_decay_days, warn_policy, updated_at)`
-- `moderation_logs (id PK, message_id, guild_id, channel_id, author_id, action, reason, created_at)`
+- `moderation_logs (id PK, message_id, guild_id, channel_id, author_id, action, reason, actor_id, actor_type, target_id, bot_id, source, metadata, created_at)`
 - `analytics_message_counts (time_bucket, guild_id, count, PK(time_bucket, guild_id))`
 - `analytics_sentiment (day, guild_id, sentiment, PK(day, guild_id))`
 - `guild_warns (id PK, guild_id, user_id, moderator_id, reason, created_at, expires_at)`
