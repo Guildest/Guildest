@@ -7,6 +7,7 @@ import { connectGuild } from "@/lib/api";
 import { useRouter } from "next/navigation";
 
 const DEFAULT_BOT_PERMISSIONS =
+  4 + // Ban Members
   1024 + // View Channels
   2048 + // Send Messages
   8192 + // Manage Messages
@@ -14,6 +15,7 @@ const DEFAULT_BOT_PERMISSIONS =
   32768 + // Attach Files
   65536 + // Read Message History
   262144 + // Use External Emojis
+  67108864 + // Moderate Members (Timeouts)
   64; // Add Reactions
 
 function buildInviteUrl(clientId: string, guildId: string, permissions: number) {

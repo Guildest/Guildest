@@ -24,7 +24,9 @@ from backend.api.auth import (
 )
 from backend.api.discord_oauth import build_authorize_url, exchange_code_for_token, fetch_me, fetch_my_guilds
 from backend.common.config import load_app_config
+from backend.common.discord_rest import unban_member
 from backend.common.logging import configure_logging
+from backend.common.openrouter import chat_completion
 from backend.common.models import GuildSettings
 from backend.common.discord_rest import bot_in_guild
 from backend.database.db import (
@@ -34,14 +36,19 @@ from backend.database.db import (
     create_session,
     delete_session,
     delete_guild_connection,
+    fetch_appeal,
     fetch_user_guild_access,
     fetch_subscription,
     fetch_guild_plan,
     fetch_guild_settings,
     fetch_message_counts,
+    fetch_message_count_sum,
     fetch_moderation_logs,
+    fetch_guild_appeals,
+    fetch_recent_moderation_count,
     fetch_sentiment_daily,
     fetch_sentiment_report,
+    fetch_latest_sentiment,
     fetch_session_user_id,
     fetch_subscription_plan,
     fetch_guild_billing_user_id,
@@ -51,7 +58,10 @@ from backend.database.db import (
     fetch_user_guilds,
     fetch_user_stripe_customer_id,
     init_db,
+    block_appeals,
     set_user_stripe_customer_id,
+    set_appeal_status,
+    set_appeal_summary,
     set_subscription_plan,
     upsert_stripe_subscription,
     upsert_guild_settings,
@@ -130,6 +140,12 @@ def _require_discord_token() -> str:
     if not config.discord_token:
         raise HTTPException(status_code=500, detail="DISCORD_TOKEN is not configured")
     return config.discord_token
+
+
+def _require_openrouter_key() -> str:
+    if not config.openrouter_api_key:
+        raise HTTPException(status_code=404, detail="openrouter not enabled")
+    return config.openrouter_api_key
 
 
 def _connected_guild_limit(plan: str) -> int:
@@ -545,12 +561,118 @@ async def disconnect_guild(guild_id: str, request: Request) -> Dict[str, bool]:
     return {"ok": True}
 
 
+@app.get("/guilds/{guild_id}/appeals")
+async def list_appeals(guild_id: str, request: Request) -> Dict[str, Any]:
+    await _require_guild_manage(request, guild_id)
+    db: Database = request.app.state.db
+    appeals = await fetch_guild_appeals(db, guild_id, limit=200)
+    return {"guild_id": guild_id, "items": appeals}
+
+
+@app.post("/guilds/{guild_id}/appeals/{appeal_id}/unban")
+async def approve_appeal(guild_id: str, appeal_id: str, request: Request) -> Dict[str, bool]:
+    moderator_id = await _require_guild_manage(request, guild_id)
+    db: Database = request.app.state.db
+    appeal = await fetch_appeal(db, appeal_id)
+    if not appeal or appeal["guild_id"] != guild_id:
+        raise HTTPException(status_code=404, detail="appeal not found")
+
+    token = _require_discord_token()
+    await unban_member(bot_token=token, guild_id=guild_id, user_id=appeal["user_id"], reason="Appeal approved")
+    await set_appeal_status(db, appeal_id, status="approved", resolved_by=moderator_id)
+    return {"ok": True}
+
+
+@app.post("/guilds/{guild_id}/appeals/{appeal_id}/delete")
+async def delete_appeal(guild_id: str, appeal_id: str, request: Request) -> Dict[str, bool]:
+    moderator_id = await _require_guild_manage(request, guild_id)
+    db: Database = request.app.state.db
+    appeal = await fetch_appeal(db, appeal_id)
+    if not appeal or appeal["guild_id"] != guild_id:
+        raise HTTPException(status_code=404, detail="appeal not found")
+    await set_appeal_status(db, appeal_id, status="deleted", resolved_by=moderator_id)
+    return {"ok": True}
+
+
+@app.post("/guilds/{guild_id}/appeals/{appeal_id}/block")
+async def block_appeal(guild_id: str, appeal_id: str, request: Request) -> Dict[str, bool]:
+    moderator_id = await _require_guild_manage(request, guild_id)
+    db: Database = request.app.state.db
+    appeal = await fetch_appeal(db, appeal_id)
+    if not appeal or appeal["guild_id"] != guild_id:
+        raise HTTPException(status_code=404, detail="appeal not found")
+    await block_appeals(db, guild_id=guild_id, user_id=appeal["user_id"], reason="Blocked by moderator")
+    await set_appeal_status(db, appeal_id, status="denied", resolved_by=moderator_id)
+    return {"ok": True}
+
+
+@app.post("/guilds/{guild_id}/appeals/{appeal_id}/summarize")
+async def summarize_appeal(guild_id: str, appeal_id: str, request: Request) -> Dict[str, Any]:
+    await _require_guild_manage(request, guild_id)
+    db: Database = request.app.state.db
+    appeal = await fetch_appeal(db, appeal_id)
+    if not appeal or appeal["guild_id"] != guild_id:
+        raise HTTPException(status_code=404, detail="appeal not found")
+
+    plan = await fetch_guild_plan(db, guild_id)
+    if plan not in {"plus", "premium"}:
+        raise HTTPException(status_code=403, detail="appeal summaries require Plus or Premium")
+
+    api_key = _require_openrouter_key()
+    prompt = "\n".join(
+        [
+            "Summarize this ban appeal in 3 bullet points.",
+            "Include a suggested outcome: approve or deny.",
+            "",
+            f"Ban reason: {appeal.get('ban_reason') or 'Not provided'}",
+            f"Appeal text: {appeal.get('appeal_text')}",
+        ]
+    )
+    summary = await chat_completion(
+        api_key=api_key,
+        model=config.openrouter_model,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.2,
+        max_tokens=300,
+    )
+    await set_appeal_summary(db, appeal_id, summary)
+    return {"summary": summary}
+
+
 @app.get("/guilds/{guild_id}/dashboard/overview")
 async def dashboard_overview(guild_id: str, request: Request) -> Dict[str, Any]:
     await _require_guild_access(request, guild_id)
     db: Database = request.app.state.db
     plan = await fetch_guild_plan(db, guild_id)
     paid = _is_paid_plan(plan)
+
+    # Fetch stats
+    now = datetime.now(timezone.utc)
+    day_ago = now - timedelta(hours=24)
+    week_ago = now - timedelta(days=7)
+    month_ago = now - timedelta(days=30)
+
+    messages_24h = await fetch_message_count_sum(db, guild_id, day_ago, now)
+    messages_7d = await fetch_message_count_sum(db, guild_id, week_ago, now)
+    messages_30d = await fetch_message_count_sum(db, guild_id, month_ago, now)
+    mod_actions_24h = await fetch_recent_moderation_count(db, guild_id, day_ago)
+    mod_actions_7d = await fetch_recent_moderation_count(db, guild_id, week_ago)
+    latest_sentiment = await fetch_latest_sentiment(db, guild_id)
+
+    # Fetch sentiment trend for last 7 days
+    sentiment_points = await fetch_sentiment_daily(db, guild_id, week_ago, now, limit=7)
+    sentiment_trend = None
+    if len(sentiment_points) >= 2:
+        latest_score = sentiment_points[-1].get("score")
+        oldest_score = sentiment_points[0].get("score")
+        if latest_score is not None and oldest_score is not None:
+            if latest_score > oldest_score:
+                sentiment_trend = "up"
+            elif latest_score < oldest_score:
+                sentiment_trend = "down"
+            else:
+                sentiment_trend = "stable"
+
     return {
         "guild_id": guild_id,
         "plan": plan,
@@ -560,6 +682,16 @@ async def dashboard_overview(guild_id: str, request: Request) -> Dict[str, Any]:
             "event_recommendations": paid,
             "analytics_extended": paid,
         },
+        "stats": {
+            "messages_24h": messages_24h,
+            "messages_7d": messages_7d,
+            "messages_30d": messages_30d,
+            "moderation_actions_24h": mod_actions_24h,
+            "moderation_actions_7d": mod_actions_7d,
+            "sentiment_score": latest_sentiment["score"] if latest_sentiment else None,
+            "sentiment_label": latest_sentiment["sentiment"] if latest_sentiment else None,
+            "sentiment_trend": sentiment_trend,
+        }
     }
 
 

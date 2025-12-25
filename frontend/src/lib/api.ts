@@ -25,6 +25,12 @@ export interface GuildSettings {
   analytics_enabled: boolean;
   sentiment_enabled: boolean;
   moderation_enabled: boolean;
+  warn_decay_days?: number;
+  warn_policy?: {
+    threshold: number;
+    action: "timeout" | "ban";
+    duration_hours?: number;
+  }[];
   welcome_channel_id?: string;
   log_channel_id?: string;
 }
@@ -93,6 +99,78 @@ export async function disconnectGuild(guildId: string) {
   });
   if (!res.ok) {
     let detail = "Failed to disconnect guild";
+    try {
+      const data = await res.json();
+      if (data?.detail) detail = String(data.detail);
+    } catch {
+      // ignore parse errors
+    }
+    throw new Error(detail);
+  }
+  return await res.json();
+}
+
+export async function summarizeAppeal(guildId: string, appealId: string) {
+  const res = await fetch(`/api/guilds/${guildId}/appeals/${appealId}/summarize`, {
+    method: "POST",
+    credentials: "include",
+  });
+  if (!res.ok) {
+    let detail = "Failed to summarize appeal";
+    try {
+      const data = await res.json();
+      if (data?.detail) detail = String(data.detail);
+    } catch {
+      // ignore parse errors
+    }
+    throw new Error(detail);
+  }
+  return await res.json();
+}
+
+export async function approveAppeal(guildId: string, appealId: string) {
+  const res = await fetch(`/api/guilds/${guildId}/appeals/${appealId}/unban`, {
+    method: "POST",
+    credentials: "include",
+  });
+  if (!res.ok) {
+    let detail = "Failed to approve appeal";
+    try {
+      const data = await res.json();
+      if (data?.detail) detail = String(data.detail);
+    } catch {
+      // ignore parse errors
+    }
+    throw new Error(detail);
+  }
+  return await res.json();
+}
+
+export async function deleteAppeal(guildId: string, appealId: string) {
+  const res = await fetch(`/api/guilds/${guildId}/appeals/${appealId}/delete`, {
+    method: "POST",
+    credentials: "include",
+  });
+  if (!res.ok) {
+    let detail = "Failed to delete appeal";
+    try {
+      const data = await res.json();
+      if (data?.detail) detail = String(data.detail);
+    } catch {
+      // ignore parse errors
+    }
+    throw new Error(detail);
+  }
+  return await res.json();
+}
+
+export async function blockAppeal(guildId: string, appealId: string) {
+  const res = await fetch(`/api/guilds/${guildId}/appeals/${appealId}/block`, {
+    method: "POST",
+    credentials: "include",
+  });
+  if (!res.ok) {
+    let detail = "Failed to block appeals";
     try {
       const data = await res.json();
       if (data?.detail) detail = String(data.detail);

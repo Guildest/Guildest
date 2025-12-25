@@ -12,7 +12,16 @@ events, normalizes payloads, and pushes them to the queue for workers.
 - On `InteractionCreate`:
   - Handles slash commands (ephemeral replies).
   - Registers application commands at startup when `DISCORD_APPLICATION_ID` is set.
-- No API/DB/LLM calls here; keep connection fast and predictable.
+  - Executes moderation actions (warn/timeout/ban) via Discord REST calls.
+  - Stores warnings and appeals in Postgres when `DATABASE_URL` is configured.
+
+## Slash commands
+- `/stats`
+- `/sentiment`
+- `/modlogs` (Plus/Premium)
+- `/warn`, `/warns`, `/warn-clear`
+- `/timeout`
+- `/ban`, `/unban`
 
 ## Running locally
 ```bash
@@ -34,7 +43,7 @@ python -m backend.discord_gateway.main
 - `DISCORD_APPLICATION_ID` (optional): Enables registering slash commands at startup.
 - `DISCORD_COMMANDS_GUILD_ID` (optional): Register commands as guild commands (faster propagation).
 - `FRONTEND_BASE_URL` (optional, default `http://localhost:3000`): Used by `/dashboard`.
-- `DATABASE_URL` (optional): Enables DB-backed slash commands (`/stats`, `/sentiment`, `/modlogs`).
+- `DATABASE_URL` (optional): Enables DB-backed slash commands, warnings, and appeals.
 - `REDIS_URL` (required): Redis connection string.
 - `QUEUE_STREAM` (optional, default `guildest:events`): Stream name for events.
 - `QUEUE_MAX_LENGTH` (optional, default `5000`): Max stream length (approximate).

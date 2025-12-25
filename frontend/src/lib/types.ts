@@ -27,6 +27,16 @@ export type DashboardOverview = {
     event_recommendations: boolean;
     analytics_extended: boolean;
   };
+  stats?: {
+    messages_24h: number;
+    messages_7d: number;
+    messages_30d: number;
+    moderation_actions_24h: number;
+    moderation_actions_7d: number;
+    sentiment_score: number | null;
+    sentiment_label: string | null;
+    sentiment_trend: "up" | "down" | "stable" | null;
+  };
 };
 
 export type MessageCountPoint = { time_bucket: string; count: number };
@@ -47,6 +57,25 @@ export type ModerationLogItem = {
 
 export type ModerationLogsResponse = { guild_id: string; items: ModerationLogItem[] };
 
+export type AppealItem = {
+  id: string;
+  user_id: string;
+  user_name?: string | null;
+  user_avatar?: string | null;
+  moderator_id?: string | null;
+  moderator_name?: string | null;
+  ban_reason?: string | null;
+  appeal_text: string;
+  status: string;
+  summary?: string | null;
+  resolved_by?: string | null;
+  resolved_at?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type AppealsResponse = { guild_id: string; items: AppealItem[] };
+
 export type GuildSettings = {
   guild_id: string;
   prefix: string;
@@ -55,6 +84,12 @@ export type GuildSettings = {
   analytics_enabled: boolean;
   sentiment_enabled: boolean;
   moderation_enabled: boolean;
+  warn_decay_days?: number;
+  warn_policy?: {
+    threshold: number;
+    action: "timeout" | "ban";
+    duration_hours?: number;
+  }[];
   welcome_channel_id?: string;
   log_channel_id?: string;
 };

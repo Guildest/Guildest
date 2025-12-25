@@ -1,6 +1,6 @@
 # Commands Worker
 
-Consumes `MESSAGE_CREATE` events and responds to prefix commands (e.g. `!help`).
+Prefix commands are deprecated. Use Discord app commands (slash commands) instead.
 
 ## Why a worker?
 
@@ -8,15 +8,14 @@ Commands can be scaled independently from the Discord gateway listener. The gate
 
 ## Current commands
 
-- `!help`
-- `!ping`
-- `!dashboard` (prints the web dashboard URL)
-- `!stats` (message counts last hour / 24 hours)
-- `!sentiment` (latest sentiment label/score)
-- `!modlogs` (Plus/Premium only; last few moderation log entries)
+Slash commands are registered by the gateway:
+
+- `/stats`
+- `/sentiment`
+- `/modlogs` (Plus/Premium only)
 
 ## Required env
 
-- `DISCORD_TOKEN` (bot token for Discord REST API)
-- `DATABASE_URL` (for prefix + metrics)
+- `DISCORD_TOKEN` (required by the gateway for app commands)
+- `DATABASE_URL` (metrics)
 - `REDIS_URL`, `QUEUE_STREAM`, `QUEUE_GROUP`, `QUEUE_CONSUMER`

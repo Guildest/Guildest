@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { useForm } from "react-hook-form";
+import { useFieldArray, useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import * as z from "zod";
 import { Loader2, Save } from "lucide-react";
@@ -20,11 +20,16 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { updateGuildSettings } from "@/lib/api";
-import { toast } from "sonner"; // Assuming we might add a toast library, or I'll simple alert for now if not installed.
+const warnPolicySchema = z.object({
+  threshold: z.coerce.number().int().min(1),
+  action: z.enum(["timeout", "ban"]),
+  duration_hours: z.coerce.number().int().min(1).max(168).optional(),
+});
 
-// I'll install sonner or use simple alert. Let's stick to simple state feedback for now to avoid extra deps if not requested, 
-// but sonner is standard in modern stacks. I'll add it to the install list or just use state.
-// Actually, I'll use simple state for success/error.
+const DEFAULT_WARN_POLICY = [
+  { threshold: 3, action: "timeout" as const, duration_hours: 24 },
+  { threshold: 5, action: "ban" as const },
+];
 
 const settingsSchema = z.object({
   prefix: z.string().min(1, "Prefix is required").max(5),
@@ -33,6 +38,8 @@ const settingsSchema = z.object({
   analytics_enabled: z.boolean(),
   sentiment_enabled: z.boolean(),
   moderation_enabled: z.boolean(),
+  warn_decay_days: z.coerce.number().int().min(0).max(365),
+  warn_policy: z.array(warnPolicySchema).default([]),
   welcome_channel_id: z.string().optional(),
   log_channel_id: z.string().optional(),
 });
@@ -49,7 +56,7 @@ export function SettingsForm({ initialSettings, guildId }: SettingsFormProps) {
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null);
 
-  const { register, handleSubmit, setValue, watch, formState: { errors } } = useForm<SettingsFormValues>({
+  const { register, handleSubmit, setValue, watch, control } = useForm<SettingsFormValues>({
     resolver: zodResolver(settingsSchema),
     defaultValues: {
       prefix: initialSettings.prefix,
@@ -58,10 +65,16 @@ export function SettingsForm({ initialSettings, guildId }: SettingsFormProps) {
       analytics_enabled: initialSettings.analytics_enabled,
       sentiment_enabled: initialSettings.sentiment_enabled,
       moderation_enabled: initialSettings.moderation_enabled,
+      warn_decay_days: initialSettings.warn_decay_days ?? 90,
+      warn_policy: (initialSettings.warn_policy && initialSettings.warn_policy.length > 0)
+        ? initialSettings.warn_policy
+        : DEFAULT_WARN_POLICY,
       welcome_channel_id: initialSettings.welcome_channel_id || "",
       log_channel_id: initialSettings.log_channel_id || "",
     },
   });
+  const warnPolicies = watch("warn_policy");
+  const warnPolicyFields = useFieldArray({ control, name: "warn_policy" });
 
   const onSubmit = async (data: SettingsFormValues) => {
     setLoading(true);
@@ -80,22 +93,15 @@ export function SettingsForm({ initialSettings, guildId }: SettingsFormProps) {
 
   return (
     <form onSubmit={handleSubmit(onSubmit)} className="space-y-6">
+      <input type="hidden" {...register("prefix")} />
       <Card>
         <CardHeader>
           <CardTitle>General Configuration</CardTitle>
           <CardDescription>
-            Basic settings for the bot in your server.
+            Basic settings for the bot in your server. Commands use Discord slash commands.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="grid gap-2">
-            <Label htmlFor="prefix">Command Prefix</Label>
-            <Input id="prefix" {...register("prefix")} placeholder="!" />
-            {errors.prefix && (
-              <p className="text-sm text-destructive">{errors.prefix.message}</p>
-            )}
-          </div>
-          
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="grid gap-2">
               <Label htmlFor="language">Language</Label>
@@ -152,6 +158,95 @@ export function SettingsForm({ initialSettings, guildId }: SettingsFormProps) {
               checked={watch("moderation_enabled")}
               onCheckedChange={(checked) => setValue("moderation_enabled", checked)}
             />
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Warnings</CardTitle>
+          <CardDescription>
+            Configure warning thresholds and automatic actions.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid gap-2">
+            <Label htmlFor="warn_decay_days">Warn Expiry (days)</Label>
+            <Input
+              id="warn_decay_days"
+              type="number"
+              min={0}
+              max={365}
+              {...register("warn_decay_days", { valueAsNumber: true })}
+            />
+            <p className="text-xs text-muted-foreground">
+              Warnings older than this are ignored when applying punishments. Set to 0 to never expire.
+            </p>
+          </div>
+
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <Label className="text-base">Warn Thresholds</Label>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => warnPolicyFields.append({ threshold: 3, action: "timeout", duration_hours: 24 })}
+              >
+                Add Rule
+              </Button>
+            </div>
+            {warnPolicyFields.fields.length === 0 && (
+              <div className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
+                No automatic punishment rules set.
+              </div>
+            )}
+            {warnPolicyFields.fields.map((field, index) => {
+              const action = warnPolicies?.[index]?.action ?? field.action;
+              return (
+                <div key={field.id} className="rounded-lg border p-4 space-y-3">
+                  <div className="grid gap-3 md:grid-cols-3">
+                    <div className="grid gap-2">
+                      <Label>Warns</Label>
+                      <Input
+                        type="number"
+                        min={1}
+                        {...register(`warn_policy.${index}.threshold`, { valueAsNumber: true })}
+                      />
+                    </div>
+                    <div className="grid gap-2">
+                      <Label>Action</Label>
+                      <select
+                        className="h-10 rounded-md border bg-background px-3 text-sm"
+                        {...register(`warn_policy.${index}.action`)}
+                      >
+                        <option value="timeout">Timeout</option>
+                        <option value="ban">Ban</option>
+                      </select>
+                    </div>
+                    <div className="grid gap-2">
+                      <Label>Duration (hours)</Label>
+                      <Input
+                        type="number"
+                        min={1}
+                        disabled={action !== "timeout"}
+                        {...register(`warn_policy.${index}.duration_hours`, { valueAsNumber: true })}
+                      />
+                    </div>
+                  </div>
+                  <div className="flex justify-end">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => warnPolicyFields.remove(index)}
+                    >
+                      Remove
+                    </Button>
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </CardContent>
       </Card>

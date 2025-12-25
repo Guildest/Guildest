@@ -6,7 +6,8 @@ import { usePathname } from "next/navigation";
 import { 
   LayoutDashboard, 
   BarChart3, 
-  ShieldAlert, 
+  ShieldAlert,
+  FileText,
   Settings, 
   CreditCard,
   LogOut,
@@ -75,6 +76,12 @@ export function Sidebar({ guildId: propGuildId, user }: SidebarProps) {
           label: "Moderation",
           icon: ShieldAlert,
           active: pathname === `/dashboard/${guildId}/moderation`,
+        },
+        {
+          href: `/dashboard/${guildId}/appeals`,
+          label: "Appeals",
+          icon: FileText,
+          active: pathname === `/dashboard/${guildId}/appeals`,
         },
         {
           href: `/dashboard/${guildId}/settings`,

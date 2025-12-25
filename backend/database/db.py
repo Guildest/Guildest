@@ -12,6 +12,12 @@ from psycopg_pool import AsyncConnectionPool
 from backend.common.models import GuildSettings, QueueMessage
 
 
+DEFAULT_WARN_POLICY = [
+    {"threshold": 3, "action": "timeout", "duration_hours": 24},
+    {"threshold": 5, "action": "ban"},
+]
+
+
 @dataclass
 class Database:
     """Wrapper around a Postgres connection pool."""
@@ -45,6 +51,11 @@ async def init_db(db: Database) -> None:
         sentiment_enabled BOOLEAN NOT NULL DEFAULT TRUE,
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+
+    ALTER TABLE guild_settings
+      ADD COLUMN IF NOT EXISTS warn_decay_days INT NOT NULL DEFAULT 90;
+    ALTER TABLE guild_settings
+      ADD COLUMN IF NOT EXISTS warn_policy JSONB NOT NULL DEFAULT '[]'::jsonb;
 
     CREATE TABLE IF NOT EXISTS moderation_logs (
         id BIGSERIAL PRIMARY KEY,
@@ -124,6 +135,61 @@ async def init_db(db: Database) -> None:
         PRIMARY KEY (user_id, guild_id)
     );
 
+    CREATE TABLE IF NOT EXISTS guild_warns (
+        id BIGSERIAL PRIMARY KEY,
+        guild_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        moderator_id TEXT NOT NULL,
+        reason TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        expires_at TIMESTAMPTZ
+    );
+
+    CREATE INDEX IF NOT EXISTS guild_warns_lookup_idx
+      ON guild_warns (guild_id, user_id, expires_at);
+
+    CREATE TABLE IF NOT EXISTS guild_ban_records (
+        id BIGSERIAL PRIMARY KEY,
+        guild_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        moderator_id TEXT NOT NULL,
+        moderator_name TEXT,
+        reason TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS guild_ban_records_lookup_idx
+      ON guild_ban_records (guild_id, user_id, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS guild_appeals (
+        id UUID PRIMARY KEY,
+        guild_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        user_name TEXT,
+        user_avatar TEXT,
+        moderator_id TEXT,
+        moderator_name TEXT,
+        ban_reason TEXT,
+        appeal_text TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'open',
+        summary TEXT,
+        resolved_by TEXT,
+        resolved_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS guild_appeals_lookup_idx
+      ON guild_appeals (guild_id, status, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS guild_appeal_blocks (
+        guild_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        reason TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (guild_id, user_id)
+    );
+
     CREATE TABLE IF NOT EXISTS sentiment_daily_samples (
         id BIGSERIAL PRIMARY KEY,
         guild_id TEXT NOT NULL,
@@ -188,7 +254,13 @@ async def fetch_guild_settings(db: Database, guild_id: str) -> GuildSettings:
     ON CONFLICT (guild_id) DO NOTHING;
     """
     select_query = """
-    SELECT guild_id, prefix, moderation_enabled, analytics_enabled, sentiment_enabled
+    SELECT guild_id,
+           prefix,
+           moderation_enabled,
+           analytics_enabled,
+           sentiment_enabled,
+           warn_decay_days,
+           warn_policy
     FROM guild_settings
     WHERE guild_id = %(guild_id)s;
     """
@@ -197,29 +269,65 @@ async def fetch_guild_settings(db: Database, guild_id: str) -> GuildSettings:
             await cur.execute(insert_query, {"guild_id": guild_id})
             await cur.execute(select_query, {"guild_id": guild_id})
             row = await cur.fetchone()
+            warn_policy = row[6] or []
+            if isinstance(warn_policy, str):
+                try:
+                    warn_policy = json.loads(warn_policy)
+                except json.JSONDecodeError:
+                    warn_policy = []
+            if not warn_policy:
+                warn_policy = DEFAULT_WARN_POLICY
             return GuildSettings(
                 guild_id=row[0],
                 prefix=row[1],
                 moderation_enabled=row[2],
                 analytics_enabled=row[3],
                 sentiment_enabled=row[4],
+                warn_decay_days=row[5],
+                warn_policy=warn_policy,
             )
 
 
 async def upsert_guild_settings(db: Database, settings: GuildSettings) -> GuildSettings:
     upsert_query = """
-    INSERT INTO guild_settings (guild_id, prefix, moderation_enabled, analytics_enabled, sentiment_enabled, updated_at)
-    VALUES (%(guild_id)s, %(prefix)s, %(moderation_enabled)s, %(analytics_enabled)s, %(sentiment_enabled)s, NOW())
+    INSERT INTO guild_settings (
+        guild_id,
+        prefix,
+        moderation_enabled,
+        analytics_enabled,
+        sentiment_enabled,
+        warn_decay_days,
+        warn_policy,
+        updated_at
+    )
+    VALUES (
+        %(guild_id)s,
+        %(prefix)s,
+        %(moderation_enabled)s,
+        %(analytics_enabled)s,
+        %(sentiment_enabled)s,
+        %(warn_decay_days)s,
+        %(warn_policy)s::jsonb,
+        NOW()
+    )
     ON CONFLICT (guild_id)
     DO UPDATE SET
         prefix = EXCLUDED.prefix,
         moderation_enabled = EXCLUDED.moderation_enabled,
         analytics_enabled = EXCLUDED.analytics_enabled,
         sentiment_enabled = EXCLUDED.sentiment_enabled,
+        warn_decay_days = EXCLUDED.warn_decay_days,
+        warn_policy = EXCLUDED.warn_policy,
         updated_at = NOW();
     """
     select_query = """
-    SELECT guild_id, prefix, moderation_enabled, analytics_enabled, sentiment_enabled
+    SELECT guild_id,
+           prefix,
+           moderation_enabled,
+           analytics_enabled,
+           sentiment_enabled,
+           warn_decay_days,
+           warn_policy
     FROM guild_settings WHERE guild_id = %(guild_id)s;
     """
     async with db.pool.connection() as conn:
@@ -232,16 +340,28 @@ async def upsert_guild_settings(db: Database, settings: GuildSettings) -> GuildS
                     "moderation_enabled": settings.moderation_enabled,
                     "analytics_enabled": settings.analytics_enabled,
                     "sentiment_enabled": settings.sentiment_enabled,
+                    "warn_decay_days": settings.warn_decay_days,
+                    "warn_policy": json.dumps([item.dict() for item in settings.warn_policy]),
                 },
             )
             await cur.execute(select_query, {"guild_id": settings.guild_id})
             row = await cur.fetchone()
+            warn_policy = row[6] or []
+            if isinstance(warn_policy, str):
+                try:
+                    warn_policy = json.loads(warn_policy)
+                except json.JSONDecodeError:
+                    warn_policy = []
+            if not warn_policy:
+                warn_policy = DEFAULT_WARN_POLICY
             return GuildSettings(
                 guild_id=row[0],
                 prefix=row[1],
                 moderation_enabled=row[2],
                 analytics_enabled=row[3],
                 sentiment_enabled=row[4],
+                warn_decay_days=row[5],
+                warn_policy=warn_policy,
             )
 
 
@@ -266,6 +386,315 @@ async def log_moderation_event(
                 },
             )
 
+
+async def insert_guild_warn(
+    db: Database,
+    guild_id: str,
+    user_id: str,
+    moderator_id: str,
+    reason: Optional[str],
+    expires_at: Optional[datetime],
+) -> None:
+    query = """
+    INSERT INTO guild_warns (guild_id, user_id, moderator_id, reason, expires_at)
+    VALUES (%(guild_id)s, %(user_id)s, %(moderator_id)s, %(reason)s, %(expires_at)s);
+    """
+    async with db.pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                query,
+                {
+                    "guild_id": guild_id,
+                    "user_id": user_id,
+                    "moderator_id": moderator_id,
+                    "reason": reason,
+                    "expires_at": expires_at,
+                },
+            )
+
+
+async def fetch_active_warns(db: Database, guild_id: str, user_id: str, now: datetime) -> list[dict[str, Any]]:
+    query = """
+    SELECT id, moderator_id, reason, created_at, expires_at
+    FROM guild_warns
+    WHERE guild_id = %(guild_id)s
+      AND user_id = %(user_id)s
+      AND (expires_at IS NULL OR expires_at > %(now)s)
+    ORDER BY created_at DESC;
+    """
+    async with db.pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(query, {"guild_id": guild_id, "user_id": user_id, "now": now})
+            rows = await cur.fetchall()
+            return [
+                {
+                    "id": row[0],
+                    "moderator_id": row[1],
+                    "reason": row[2],
+                    "created_at": row[3],
+                    "expires_at": row[4],
+                }
+                for row in rows
+            ]
+
+
+async def clear_warns(db: Database, guild_id: str, user_id: str) -> int:
+    query = "DELETE FROM guild_warns WHERE guild_id = %(guild_id)s AND user_id = %(user_id)s;"
+    async with db.pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(query, {"guild_id": guild_id, "user_id": user_id})
+            return cur.rowcount or 0
+
+
+async def record_ban_action(
+    db: Database,
+    guild_id: str,
+    user_id: str,
+    moderator_id: str,
+    moderator_name: Optional[str],
+    reason: Optional[str],
+) -> None:
+    query = """
+    INSERT INTO guild_ban_records (guild_id, user_id, moderator_id, moderator_name, reason)
+    VALUES (%(guild_id)s, %(user_id)s, %(moderator_id)s, %(moderator_name)s, %(reason)s);
+    """
+    async with db.pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                query,
+                {
+                    "guild_id": guild_id,
+                    "user_id": user_id,
+                    "moderator_id": moderator_id,
+                    "moderator_name": moderator_name,
+                    "reason": reason,
+                },
+            )
+
+
+async def fetch_latest_ban_record(db: Database, guild_id: str, user_id: str) -> Optional[dict[str, Any]]:
+    query = """
+    SELECT moderator_id, moderator_name, reason, created_at
+    FROM guild_ban_records
+    WHERE guild_id = %(guild_id)s AND user_id = %(user_id)s
+    ORDER BY created_at DESC
+    LIMIT 1;
+    """
+    async with db.pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(query, {"guild_id": guild_id, "user_id": user_id})
+            row = await cur.fetchone()
+            if not row:
+                return None
+            return {
+                "moderator_id": row[0],
+                "moderator_name": row[1],
+                "reason": row[2],
+                "created_at": row[3],
+            }
+
+
+async def create_appeal(
+    db: Database,
+    appeal_id: uuid.UUID,
+    guild_id: str,
+    user_id: str,
+    user_name: Optional[str],
+    user_avatar: Optional[str],
+    moderator_id: Optional[str],
+    moderator_name: Optional[str],
+    ban_reason: Optional[str],
+    appeal_text: str,
+) -> dict[str, Any]:
+    query = """
+    INSERT INTO guild_appeals (
+        id,
+        guild_id,
+        user_id,
+        user_name,
+        user_avatar,
+        moderator_id,
+        moderator_name,
+        ban_reason,
+        appeal_text
+    )
+    VALUES (
+        %(id)s::uuid,
+        %(guild_id)s,
+        %(user_id)s,
+        %(user_name)s,
+        %(user_avatar)s,
+        %(moderator_id)s,
+        %(moderator_name)s,
+        %(ban_reason)s,
+        %(appeal_text)s
+    )
+    RETURNING id, status, created_at;
+    """
+    async with db.pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                query,
+                {
+                    "id": appeal_id,
+                    "guild_id": guild_id,
+                    "user_id": user_id,
+                    "user_name": user_name,
+                    "user_avatar": user_avatar,
+                    "moderator_id": moderator_id,
+                    "moderator_name": moderator_name,
+                    "ban_reason": ban_reason,
+                    "appeal_text": appeal_text,
+                },
+            )
+            row = await cur.fetchone()
+            return {"id": str(row[0]), "status": row[1], "created_at": row[2]}
+
+
+async def fetch_guild_appeals(db: Database, guild_id: str, limit: int = 200) -> list[dict[str, Any]]:
+    query = """
+    SELECT id,
+           user_id,
+           user_name,
+           user_avatar,
+           moderator_id,
+           moderator_name,
+           ban_reason,
+           appeal_text,
+           status,
+           summary,
+           resolved_by,
+           resolved_at,
+           created_at,
+           updated_at
+    FROM guild_appeals
+    WHERE guild_id = %(guild_id)s
+    ORDER BY created_at DESC
+    LIMIT %(limit)s;
+    """
+    async with db.pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(query, {"guild_id": guild_id, "limit": limit})
+            rows = await cur.fetchall()
+            return [
+                {
+                    "id": str(row[0]),
+                    "user_id": row[1],
+                    "user_name": row[2],
+                    "user_avatar": row[3],
+                    "moderator_id": row[4],
+                    "moderator_name": row[5],
+                    "ban_reason": row[6],
+                    "appeal_text": row[7],
+                    "status": row[8],
+                    "summary": row[9],
+                    "resolved_by": row[10],
+                    "resolved_at": row[11],
+                    "created_at": row[12],
+                    "updated_at": row[13],
+                }
+                for row in rows
+            ]
+
+
+async def fetch_appeal(db: Database, appeal_id: str) -> Optional[dict[str, Any]]:
+    query = """
+    SELECT id,
+           guild_id,
+           user_id,
+           user_name,
+           user_avatar,
+           moderator_id,
+           moderator_name,
+           ban_reason,
+           appeal_text,
+           status,
+           summary,
+           resolved_by,
+           resolved_at,
+           created_at,
+           updated_at
+    FROM guild_appeals
+    WHERE id = %(appeal_id)s::uuid;
+    """
+    async with db.pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(query, {"appeal_id": appeal_id})
+            row = await cur.fetchone()
+            if not row:
+                return None
+            return {
+                "id": str(row[0]),
+                "guild_id": row[1],
+                "user_id": row[2],
+                "user_name": row[3],
+                "user_avatar": row[4],
+                "moderator_id": row[5],
+                "moderator_name": row[6],
+                "ban_reason": row[7],
+                "appeal_text": row[8],
+                "status": row[9],
+                "summary": row[10],
+                "resolved_by": row[11],
+                "resolved_at": row[12],
+                "created_at": row[13],
+                "updated_at": row[14],
+            }
+
+
+async def set_appeal_status(
+    db: Database,
+    appeal_id: str,
+    status: str,
+    resolved_by: Optional[str],
+) -> None:
+    query = """
+    UPDATE guild_appeals
+    SET status = %(status)s,
+        resolved_by = %(resolved_by)s,
+        resolved_at = NOW(),
+        updated_at = NOW()
+    WHERE id = %(appeal_id)s::uuid;
+    """
+    async with db.pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                query,
+                {"appeal_id": appeal_id, "status": status, "resolved_by": resolved_by},
+            )
+
+
+async def set_appeal_summary(db: Database, appeal_id: str, summary: str) -> None:
+    query = """
+    UPDATE guild_appeals
+    SET summary = %(summary)s,
+        updated_at = NOW()
+    WHERE id = %(appeal_id)s::uuid;
+    """
+    async with db.pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(query, {"appeal_id": appeal_id, "summary": summary})
+
+
+async def is_appeal_blocked(db: Database, guild_id: str, user_id: str) -> bool:
+    query = "SELECT 1 FROM guild_appeal_blocks WHERE guild_id = %(guild_id)s AND user_id = %(user_id)s;"
+    async with db.pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(query, {"guild_id": guild_id, "user_id": user_id})
+            return (await cur.fetchone()) is not None
+
+
+async def block_appeals(db: Database, guild_id: str, user_id: str, reason: Optional[str]) -> None:
+    query = """
+    INSERT INTO guild_appeal_blocks (guild_id, user_id, reason)
+    VALUES (%(guild_id)s, %(user_id)s, %(reason)s)
+    ON CONFLICT (guild_id, user_id) DO UPDATE
+      SET reason = EXCLUDED.reason,
+          created_at = NOW();
+    """
+    async with db.pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(query, {"guild_id": guild_id, "user_id": user_id, "reason": reason})
 
 async def bump_message_count(db: Database, message: QueueMessage) -> None:
     """Increment per-minute message counts."""
@@ -740,6 +1169,20 @@ async def fetch_moderation_logs(db: Database, guild_id: str, limit: int = 200) -
                 }
                 for row in rows
             ]
+
+
+async def fetch_recent_moderation_count(db: Database, guild_id: str, since: datetime) -> int:
+    query = """
+    SELECT COUNT(*)
+    FROM moderation_logs
+    WHERE guild_id = %(guild_id)s
+      AND created_at >= %(since)s;
+    """
+    async with db.pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(query, {"guild_id": guild_id, "since": since})
+            row = await cur.fetchone()
+            return int(row[0] or 0)
 
 
 async def fetch_message_count_sum(db: Database, guild_id: str, from_ts: datetime, to_ts: datetime) -> int:

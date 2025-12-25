@@ -12,11 +12,18 @@ Provides Discord OAuth login + per-guild dashboards/settings for the web fronten
   - `DISCORD_OAUTH_REDIRECT_URI` (must match your Discord application settings)
 - `FRONTEND_BASE_URL` (e.g. `http://localhost:3000`)
 
+Optional (Discord bot integration):
+- `DISCORD_TOKEN` (required for bot presence checks + appeal unbans)
+
 Optional (Stripe billing):
 - `STRIPE_SECRET_KEY`
 - `STRIPE_WEBHOOK_SECRET`
 - `STRIPE_PLUS_PRICE_ID`
 - `STRIPE_PREMIUM_PRICE_ID`
+
+Optional (Appeal summaries):
+- `OPENROUTER_API_KEY`
+- `OPENROUTER_MODEL` (default `deepseek/deepseek-v3.2`)
 
 ## Auth
 
@@ -32,6 +39,7 @@ OAuth flow:
 ## Guild onboarding
 
 - `POST /guilds/{guild_id}/connect` marks the guild as owned/billed by the current user (requires Manage Guild permissions).
+- `POST /guilds/{guild_id}/disconnect` removes the guild from the current user's billing account.
 
 ## Dashboards (subscription-gated)
 
@@ -45,6 +53,14 @@ OAuth flow:
 
 - `GET /guilds/{guild_id}/settings`
 - `PATCH /guilds/{guild_id}/settings`
+
+## Appeals
+
+- `GET /guilds/{guild_id}/appeals`
+- `POST /guilds/{guild_id}/appeals/{appeal_id}/unban`
+- `POST /guilds/{guild_id}/appeals/{appeal_id}/delete`
+- `POST /guilds/{guild_id}/appeals/{appeal_id}/block`
+- `POST /guilds/{guild_id}/appeals/{appeal_id}/summarize` (Plus/Premium only)
 
 ## Billing (Stripe)
 
