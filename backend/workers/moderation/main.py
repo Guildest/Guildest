@@ -68,7 +68,7 @@ async def handle_message(message: QueueMessage, _: AppConfig, db: Optional[Datab
     logging.info("[moderation] %s message %s in guild %s (%s)", action, message.message_id, message.guild_id, reason)
 
     plan = await _guild_plan(db, message.guild_id)
-    if plan == "pro":
+    if plan in {"plus", "premium"}:
         await log_moderation_event(db, message, action=action, reason=reason)
         logging.debug("[moderation] logged moderation event for message %s", message.message_id)
 

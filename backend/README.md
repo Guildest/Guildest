@@ -10,10 +10,10 @@
 ## What’s implemented
 
 - Discord OAuth login (user `identify` + `guilds`) with server-side sessions.
-- Per-user subscription plan (`free` vs `pro`) and per-guild billing ownership (`/guilds/{id}/connect`).
+- Per-user subscription plan (`free` vs `plus`/`premium`) and per-guild billing ownership (`/guilds/{id}/connect`).
 - Subscription-gated endpoints:
-  - Pro-only moderation audit history
-  - Pro-only daily sentiment report + event recommendations
+  - Plus/Premium moderation audit history
+  - Plus/Premium daily sentiment report + event recommendations
 - Analytics: per-minute message counts (time series).
 
 ## OpenRouter model
@@ -21,4 +21,3 @@
 Sentiment “daily agent” uses OpenRouter:
 - `OPENROUTER_API_KEY`
 - `OPENROUTER_MODEL=deepseek/deepseek-v3.2`
-

@@ -44,7 +44,7 @@ export async function fetchMe(): Promise<User | null> {
 
 export async function fetchGuildSettings(guildId: string): Promise<GuildSettings | null> {
   try {
-    const res = await fetch(`${API_BASE_URL}/guilds/${guildId}/settings`, {
+    const res = await fetch(`/api/guilds/${guildId}/settings`, {
       credentials: "include",
     });
     if (!res.ok) throw new Error("Failed to fetch settings");
@@ -56,7 +56,7 @@ export async function fetchGuildSettings(guildId: string): Promise<GuildSettings
 }
 
 export async function updateGuildSettings(guildId: string, settings: Partial<GuildSettings>) {
-  const res = await fetch(`${API_BASE_URL}/guilds/${guildId}/settings`, {
+  const res = await fetch(`/api/guilds/${guildId}/settings`, {
     method: "PATCH",
     headers: {
       "Content-Type": "application/json",
@@ -69,11 +69,38 @@ export async function updateGuildSettings(guildId: string, settings: Partial<Gui
 }
 
 export async function connectGuild(guildId: string) {
-  const res = await fetch(`${API_BASE_URL}/guilds/${guildId}/connect`, {
+  const res = await fetch(`/api/guilds/${guildId}/connect`, {
     method: "POST",
     credentials: "include",
   });
-  if (!res.ok) throw new Error("Failed to connect guild");
+  if (!res.ok) {
+    let detail = "Failed to connect guild";
+    try {
+      const data = await res.json();
+      if (data?.detail) detail = String(data.detail);
+    } catch {
+      // ignore parse errors
+    }
+    throw new Error(detail);
+  }
+  return await res.json();
+}
+
+export async function disconnectGuild(guildId: string) {
+  const res = await fetch(`/api/guilds/${guildId}/disconnect`, {
+    method: "POST",
+    credentials: "include",
+  });
+  if (!res.ok) {
+    let detail = "Failed to disconnect guild";
+    try {
+      const data = await res.json();
+      if (data?.detail) detail = String(data.detail);
+    } catch {
+      // ignore parse errors
+    }
+    throw new Error(detail);
+  }
   return await res.json();
 }
 
@@ -94,7 +121,7 @@ export function buildLoginUrl(redirectPath: string = "/dashboard"): string {
 }
 
 export async function createBillingCheckoutUrl(plan: "plus" | "premium" = "plus"): Promise<string> {
-  const res = await fetch(`${API_BASE_URL}/billing/checkout`, {
+  const res = await fetch(`/api/billing/checkout`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ plan }),
@@ -108,7 +135,7 @@ export async function createBillingCheckoutUrl(plan: "plus" | "premium" = "plus"
 }
 
 export async function createBillingPortalUrl(): Promise<string> {
-  const res = await fetch(`${API_BASE_URL}/billing/portal`, {
+  const res = await fetch(`/api/billing/portal`, {
     method: "POST",
     credentials: "include",
   });

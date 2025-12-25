@@ -129,7 +129,7 @@ async def _maybe_generate_report(
         return
 
     plan = await _guild_plan(db, guild_id)
-    if plan != "pro":
+    if plan not in {"plus", "premium"}:
         return
 
     now = datetime.now(timezone.utc)
@@ -213,9 +213,9 @@ async def handle_message(message: QueueMessage, config: AppConfig, db: Optional[
         await record_sentiment_score(db, message.guild_id, day, sentiment=_score_to_label(avg), score=float(avg))
         stats.last_persist_at = now
 
-    # For pro servers, sample messages to support daily report generation.
+    # For paid servers, sample messages to support daily report generation.
     plan = await _guild_plan(db, message.guild_id)
-    if plan == "pro" and message.content:
+    if plan in {"plus", "premium"} and message.content:
         if abs(hash(message.message_id)) % 25 == 0:
             await insert_sentiment_sample(db, message.guild_id, day, _sanitize_sample(message.content))
 

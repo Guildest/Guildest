@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -25,12 +26,14 @@ from backend.api.discord_oauth import build_authorize_url, exchange_code_for_tok
 from backend.common.config import load_app_config
 from backend.common.logging import configure_logging
 from backend.common.models import GuildSettings
+from backend.common.discord_rest import bot_in_guild
 from backend.database.db import (
     Database,
     connect_guild_to_user,
     create_pool,
     create_session,
     delete_session,
+    delete_guild_connection,
     fetch_user_guild_access,
     fetch_subscription,
     fetch_guild_plan,
@@ -41,7 +44,9 @@ from backend.database.db import (
     fetch_sentiment_report,
     fetch_session_user_id,
     fetch_subscription_plan,
+    fetch_guild_billing_user_id,
     fetch_user_id_by_stripe_customer_id,
+    fetch_user_profile,
     fetch_user_connected_guild_ids,
     fetch_user_guilds,
     fetch_user_stripe_customer_id,
@@ -68,7 +73,7 @@ class DevSetPlanBody(BaseModel):
 
 
 class BillingCheckoutBody(BaseModel):
-    plan: str = "pro"
+    plan: str = "plus"
 
 
 config = load_app_config()
@@ -121,6 +126,44 @@ def _require_stripe_webhook_secret() -> str:
     return config.stripe_webhook_secret
 
 
+def _require_discord_token() -> str:
+    if not config.discord_token:
+        raise HTTPException(status_code=500, detail="DISCORD_TOKEN is not configured")
+    return config.discord_token
+
+
+def _connected_guild_limit(plan: str) -> int:
+    normalized = plan.strip().lower()
+    if normalized == "premium":
+        return 10
+    if normalized == "plus":
+        return 3
+    return 1
+
+
+async def _bot_presence_map(guild_ids: set[str], require_token: bool = False) -> dict[str, bool]:
+    if not guild_ids:
+        return {}
+    guild_list = list(guild_ids)
+    token = config.discord_token
+    if not token:
+        if require_token:
+            raise HTTPException(status_code=500, detail="DISCORD_TOKEN is not configured")
+        return {guild_id: True for guild_id in guild_list}
+    results = await asyncio.gather(
+        *[bot_in_guild(bot_token=token, guild_id=guild_id) for guild_id in guild_list],
+        return_exceptions=True,
+    )
+    presence: dict[str, bool] = {}
+    for guild_id, result in zip(guild_list, results):
+        if isinstance(result, Exception):
+            logging.warning("Discord bot presence check failed for guild %s: %s", guild_id, result)
+            presence[guild_id] = False
+        else:
+            presence[guild_id] = result
+    return presence
+
+
 def _get_stripe_price_id(plan: str) -> str:
     """Get the Stripe price ID for the given plan tier."""
     if plan == "plus":
@@ -133,6 +176,42 @@ def _get_stripe_price_id(plan: str) -> str:
         return config.stripe_premium_price_id
     else:
         raise HTTPException(status_code=400, detail=f"Invalid plan: {plan}")
+
+
+def _is_paid_plan(plan: str) -> bool:
+    return plan in {"plus", "premium"}
+
+
+def _analytics_hours_limit(plan: str) -> int:
+    if plan == "premium":
+        return 24 * 90
+    if plan == "plus":
+        return 24 * 30
+    return 24 * 7
+
+
+def _message_counts_limit(plan: str) -> int:
+    if plan == "premium":
+        return 5000
+    if plan == "plus":
+        return 3000
+    return 1500
+
+
+def _sentiment_days_limit(plan: str) -> int:
+    if plan == "premium":
+        return 90
+    if plan == "plus":
+        return 30
+    return 0
+
+
+def _moderation_logs_limit(plan: str) -> int:
+    if plan == "premium":
+        return 500
+    if plan == "plus":
+        return 200
+    return 0
 
 
 def _frontend_base_url() -> str:
@@ -283,12 +362,26 @@ async def me(request: Request) -> Dict[str, Any]:
     user_id = await _require_user_id(request)
     db: Database = request.app.state.db
     plan = await fetch_subscription_plan(db, user_id)
+    profile = await fetch_user_profile(db, user_id)
     guilds = await fetch_user_guilds(db, user_id)
     connected = await fetch_user_connected_guild_ids(db, user_id)
+    bot_presence = await _bot_presence_map(connected)
+    active_connected = {guild_id for guild_id, present in bot_presence.items() if present}
     return {
         "user_id": user_id,
+        "username": profile["username"] if profile else user_id,
+        "avatar": profile["avatar"] if profile else None,
         "plan": plan,
-        "guilds": [{**g, "connected": g["guild_id"] in connected} for g in guilds],
+        "connected_limit": _connected_guild_limit(plan),
+        "guilds": [
+            {
+                **g,
+                "connected": g["guild_id"] in active_connected,
+                "bot_present": bot_presence.get(g["guild_id"]),
+            }
+            for g in guilds
+        ],
+        "discord_client_id": config.discord_client_id,
     }
 
 
@@ -413,8 +506,42 @@ async def update_settings(guild_id: str, body: GuildSettings, request: Request) 
 async def connect_guild(guild_id: str, request: Request) -> Dict[str, bool]:
     user_id = await _require_guild_manage(request, guild_id)
     db: Database = request.app.state.db
+    plan = await fetch_subscription_plan(db, user_id)
+    connected = await fetch_user_connected_guild_ids(db, user_id)
+    bot_presence = await _bot_presence_map(connected, require_token=True)
+    active_connected = {gid for gid, present in bot_presence.items() if present}
+    limit = _connected_guild_limit(plan)
+
+    if guild_id in active_connected:
+        return {"ok": True}
+
+    token = _require_discord_token()
+    if not await bot_in_guild(bot_token=token, guild_id=guild_id):
+        raise HTTPException(status_code=400, detail="Bot is not in this guild. Invite it first.")
+
+    if len(active_connected) >= limit:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Plan limit reached. You can connect up to {limit} guilds.",
+        )
+
     await connect_guild_to_user(db, guild_id=guild_id, billing_user_id=user_id)
     await fetch_guild_settings(db, guild_id)
+    return {"ok": True}
+
+
+@app.post("/guilds/{guild_id}/disconnect")
+async def disconnect_guild(guild_id: str, request: Request) -> Dict[str, bool]:
+    user_id = await _require_guild_manage(request, guild_id)
+    db: Database = request.app.state.db
+
+    billing_user_id = await fetch_guild_billing_user_id(db, guild_id)
+    if not billing_user_id:
+        return {"ok": True}
+    if billing_user_id != user_id:
+        raise HTTPException(status_code=403, detail="Only the billing owner can disconnect this guild.")
+
+    await delete_guild_connection(db, guild_id=guild_id, billing_user_id=user_id)
     return {"ok": True}
 
 
@@ -423,14 +550,15 @@ async def dashboard_overview(guild_id: str, request: Request) -> Dict[str, Any]:
     await _require_guild_access(request, guild_id)
     db: Database = request.app.state.db
     plan = await fetch_guild_plan(db, guild_id)
+    paid = _is_paid_plan(plan)
     return {
         "guild_id": guild_id,
         "plan": plan,
         "features": {
-            "moderation_logs": plan == "pro",
-            "sentiment_reports": plan == "pro",
-            "event_recommendations": plan == "pro",
-            "analytics_extended": plan == "pro",
+            "moderation_logs": paid,
+            "sentiment_reports": paid,
+            "event_recommendations": paid,
+            "analytics_extended": paid,
         },
     }
 
@@ -444,10 +572,10 @@ async def analytics_message_counts(guild_id: str, request: Request, hours: int =
         raise HTTPException(status_code=403, detail="analytics disabled for guild")
     plan = await fetch_guild_plan(db, guild_id)
 
-    hours = max(1, min(hours, 24 * 14 if plan == "pro" else 24 * 7))
+    hours = max(1, min(hours, _analytics_hours_limit(plan)))
     to_ts = datetime.now(timezone.utc)
     from_ts = to_ts - timedelta(hours=hours)
-    points = await fetch_message_counts(db, guild_id, from_ts, to_ts, limit=5000 if plan == "pro" else 1500)
+    points = await fetch_message_counts(db, guild_id, from_ts, to_ts, limit=_message_counts_limit(plan))
     return {"guild_id": guild_id, "from": from_ts.isoformat(), "to": to_ts.isoformat(), "points": points}
 
 
@@ -459,8 +587,10 @@ async def sentiment_daily(guild_id: str, request: Request, days: int = 30) -> Di
     if not settings.sentiment_enabled:
         raise HTTPException(status_code=403, detail="sentiment disabled for guild")
     plan = await fetch_guild_plan(db, guild_id)
+    if not _is_paid_plan(plan):
+        raise HTTPException(status_code=402, detail="sentiment tracking requires a paid plan")
 
-    days = max(1, min(days, 365 if plan == "pro" else 30))
+    days = max(1, min(days, _sentiment_days_limit(plan)))
     to_day = datetime.now(timezone.utc)
     from_day = to_day - timedelta(days=days)
     points = await fetch_sentiment_daily(db, guild_id, from_day, to_day)
@@ -475,8 +605,8 @@ async def sentiment_report(guild_id: str, request: Request, day: Optional[str] =
     if not settings.sentiment_enabled:
         raise HTTPException(status_code=403, detail="sentiment disabled for guild")
     plan = await fetch_guild_plan(db, guild_id)
-    if plan != "pro":
-        raise HTTPException(status_code=402, detail="sentiment report requires pro plan")
+    if not _is_paid_plan(plan):
+        raise HTTPException(status_code=402, detail="sentiment report requires a paid plan")
 
     target = datetime.now(timezone.utc)
     if day:
@@ -493,10 +623,10 @@ async def moderation_logs(guild_id: str, request: Request, limit: int = 200) -> 
     if not settings.moderation_enabled:
         raise HTTPException(status_code=403, detail="moderation disabled for guild")
     plan = await fetch_guild_plan(db, guild_id)
-    if plan != "pro":
-        raise HTTPException(status_code=402, detail="moderation log history requires pro plan")
+    if not _is_paid_plan(plan):
+        raise HTTPException(status_code=402, detail="moderation log history requires a paid plan")
 
-    limit = max(1, min(limit, 500))
+    limit = max(1, min(limit, _moderation_logs_limit(plan)))
     rows = await fetch_moderation_logs(db, guild_id, limit=limit)
     return {"guild_id": guild_id, "items": rows}
 

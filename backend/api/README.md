@@ -15,7 +15,8 @@ Provides Discord OAuth login + per-guild dashboards/settings for the web fronten
 Optional (Stripe billing):
 - `STRIPE_SECRET_KEY`
 - `STRIPE_WEBHOOK_SECRET`
-- `STRIPE_PRO_PRICE_ID`
+- `STRIPE_PLUS_PRICE_ID`
+- `STRIPE_PREMIUM_PRICE_ID`
 
 ## Auth
 
@@ -37,8 +38,8 @@ OAuth flow:
 - `GET /guilds/{guild_id}/dashboard/overview` → feature flags for UI locking
 - `GET /guilds/{guild_id}/analytics/message-counts?hours=168`
 - `GET /guilds/{guild_id}/sentiment/daily?days=30`
-- `GET /guilds/{guild_id}/sentiment/report?day=YYYY-MM-DD` (Pro)
-- `GET /guilds/{guild_id}/moderation/logs?limit=200` (Pro)
+- `GET /guilds/{guild_id}/sentiment/report?day=YYYY-MM-DD` (Plus/Premium)
+- `GET /guilds/{guild_id}/moderation/logs?limit=200` (Plus/Premium)
 
 ## Settings
 
@@ -48,6 +49,6 @@ OAuth flow:
 ## Billing (Stripe)
 
 - `GET /billing/subscription`
-- `POST /billing/checkout` (body: `{ "plan": "pro" }`)
+- `POST /billing/checkout` (body: `{ "plan": "plus" | "premium" }`)
 - `POST /billing/portal`
 - `POST /webhooks/stripe` (alias: `/subscriptions/stripe`)

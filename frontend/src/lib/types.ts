@@ -5,12 +5,17 @@ export type GuildSummary = {
   is_owner: boolean;
   permissions: number;
   connected: boolean;
+  bot_present?: boolean | null;
 };
 
 export type MeResponse = {
   user_id: string;
+  username?: string | null;
+  avatar?: string | null;
   plan: "free" | "plus" | "premium" | string;
+  connected_limit?: number | null;
   guilds: GuildSummary[];
+  discord_client_id?: string | null;
 };
 
 export type DashboardOverview = {
@@ -53,4 +58,3 @@ export type GuildSettings = {
   welcome_channel_id?: string;
   log_channel_id?: string;
 };
-

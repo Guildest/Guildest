@@ -19,9 +19,15 @@ import { logout } from "@/lib/api";
 
 interface SidebarProps {
   guildId?: string;
+  user?: {
+    userId?: string;
+    username?: string | null;
+    avatar?: string | null;
+    plan?: string | null;
+  };
 }
 
-export function Sidebar({ guildId: propGuildId }: SidebarProps) {
+export function Sidebar({ guildId: propGuildId, user }: SidebarProps) {
   const pathname = usePathname();
   const [isOpen, setIsOpen] = useState(false);
 
@@ -32,6 +38,11 @@ export function Sidebar({ guildId: propGuildId }: SidebarProps) {
   const derivedGuildId = candidateGuildId && candidateGuildId !== "billing" ? candidateGuildId : undefined;
   
   const guildId = propGuildId || derivedGuildId;
+  const displayName = user?.username || user?.userId || "User";
+  const avatarUrl =
+    user?.avatar && user?.userId
+      ? `https://cdn.discordapp.com/avatars/${user.userId}/${user.avatar}.png?size=96`
+      : null;
 
   // Close sidebar on route change on mobile
   useEffect(() => {
@@ -106,6 +117,29 @@ export function Sidebar({ guildId: propGuildId }: SidebarProps) {
               <span>Guildest</span>
             </Link>
           </div>
+          {user && (
+            <div className="border-b px-6 py-4">
+              <div className="flex items-center gap-3">
+                {avatarUrl ? (
+                  <img
+                    src={avatarUrl}
+                    alt={displayName}
+                    className="h-10 w-10 rounded-full border border-primary/30"
+                  />
+                ) : (
+                  <div className="flex h-10 w-10 items-center justify-center rounded-full bg-secondary text-sm font-semibold text-secondary-foreground">
+                    {displayName.charAt(0).toUpperCase()}
+                  </div>
+                )}
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-semibold">{displayName}</p>
+                  <p className="text-xs uppercase tracking-wide text-muted-foreground">
+                    {user.plan || "free"}
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
 
           <div className="flex-1 overflow-y-auto py-4">
             <nav className="space-y-1 px-2">

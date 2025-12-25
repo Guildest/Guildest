@@ -66,4 +66,5 @@ Also required for Discord OAuth login:
 Optional (Stripe billing):
 - `STRIPE_SECRET_KEY`
 - `STRIPE_WEBHOOK_SECRET`
-- `STRIPE_PRO_PRICE_ID`
+- `STRIPE_PLUS_PRICE_ID`
+- `STRIPE_PREMIUM_PRICE_ID`

@@ -11,7 +11,7 @@ type Props = {
   variant?: "default" | "secondary" | "outline" | "ghost";
 };
 
-export function CheckoutProButton({
+export function CheckoutPlanButton({
   plan = "plus",
   redirectAfterLogin = "/pricing?checkout=plus",
   label = "Upgrade to Plus",
@@ -42,4 +42,3 @@ export function CheckoutProButton({
     </Button>
   );
 }
-

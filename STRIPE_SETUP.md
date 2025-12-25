@@ -2,9 +2,9 @@
 
 ## Overview
 
-Guildest has a fully integrated Stripe subscription system for the Pro plan with the following features:
+Guildest has a fully integrated Stripe subscription system for Plus/Premium plans with the following features:
 
-- **Pro plan subscription** with Stripe Checkout
+- **Plus/Premium subscriptions** with Stripe Checkout
 - **Customer portal** for managing subscriptions (cancel, update payment, etc.)
 - **Webhook processing** for real-time subscription updates
 - **Automatic plan sync** - webhooks update user plans in database
@@ -41,16 +41,17 @@ From your Stripe Dashboard (test mode):
 2. Copy your **Secret key** (starts with `sk_test_`)
 3. This is your `STRIPE_SECRET_KEY`
 
-### 2. Create a Product and Price
+### 2. Create Products and Prices
 
 1. Go to **Products** in Stripe Dashboard
 2. Click **Add product**
-3. Set name: "Guildest Pro" (or similar)
+3. Set name: "Guildest Plus" (or similar)
 4. Set pricing: Recurring, monthly (or your preferred billing cycle)
 5. Set amount (e.g., $9.99/month)
 6. Click **Save product**
 7. Copy the **Price ID** (starts with `price_`)
-8. This is your `STRIPE_PRO_PRICE_ID`
+8. This is your `STRIPE_PLUS_PRICE_ID`
+9. Repeat for "Guildest Premium" and save its **Price ID** as `STRIPE_PREMIUM_PRICE_ID`
 
 ### 3. Set Up Webhook Endpoint
 
@@ -90,7 +91,8 @@ Add these to your `.env` file:
 # Stripe Configuration (Test Mode)
 STRIPE_SECRET_KEY=sk_test_your_secret_key_here
 STRIPE_WEBHOOK_SECRET=whsec_your_webhook_secret_here
-STRIPE_PRO_PRICE_ID=price_your_price_id_here
+STRIPE_PLUS_PRICE_ID=price_plus_id_here
+STRIPE_PREMIUM_PRICE_ID=price_premium_id_here
 ```
 
 ### 5. Restart Your Services
@@ -108,7 +110,7 @@ docker compose up --build
 
 1. Log in to your dashboard at `http://localhost:3000/dashboard`
 2. Go to `/dashboard/billing`
-3. Click "Upgrade to Pro" or similar button
+3. Click "Upgrade to Plus" or "Upgrade to Premium"
 4. You'll be redirected to Stripe Checkout
 5. Use Stripe test card: `4242 4242 4242 4242`
    - Any future expiry date
@@ -124,7 +126,7 @@ Watch your API logs - you should see:
 Received Stripe webhook checkout.session.completed
 ```
 
-Your user's plan in the database should update from "free" to "pro".
+Your user's plan in the database should update from "free" to "plus" or "premium".
 
 ### Test Billing Portal
 
@@ -142,7 +144,7 @@ SELECT * FROM subscriptions WHERE user_id = 'your_user_id';
 ```
 
 You should see:
-- `plan = 'pro'` when subscription is active
+- `plan = 'plus'` or `plan = 'premium'` when subscription is active
 - `status` matching Stripe subscription status
 - `current_period_end` timestamp
 - `stripe_subscription_id` and `stripe_price_id`
@@ -158,9 +160,9 @@ The implementation properly verifies webhook signatures using `stripe.Webhook.co
 When a user checks out for the first time, a Stripe Customer is created and linked to their `user_id` via the `users` table `stripe_customer_id` column (lines 318-322).
 
 ### Subscription Plan Logic
-Plan is set to "pro" only if:
+Plan is set to "plus" or "premium" only if:
 - Subscription status is `active` or `trialing`
-- The price_id matches your configured `STRIPE_PRO_PRICE_ID`
+- The price_id matches your configured `STRIPE_PLUS_PRICE_ID` or `STRIPE_PREMIUM_PRICE_ID`
 
 (See backend/api/main.py:562-564)
 
@@ -170,7 +172,7 @@ Plan is set to "pro" only if:
 3. User completes payment
 4. Stripe redirects to `success_url`
 5. Webhook fires → Backend updates database
-6. User has Pro access
+6. User has paid access
 
 ---
 
@@ -179,12 +181,12 @@ Plan is set to "pro" only if:
 For testing without Stripe, use the dev endpoint (requires `DEV_ADMIN_TOKEN` in `.env`):
 
 ```bash
-# Set a user to Pro without Stripe
+# Set a user to Plus without Stripe
 curl -X POST http://localhost:8000/subscriptions/dev/set-plan \
   -H "Content-Type: application/json" \
   -H "X-Dev-Admin-Token: your_dev_token" \
   -H "Authorization: Bearer your_session_token" \
-  -d '{"plan": "pro"}'
+  -d '{"plan": "plus"}'
 ```
 
 ---
@@ -210,7 +212,7 @@ More test cards: https://stripe.com/docs/testing
 
 ### Plan not updating after checkout
 - Check API logs for webhook errors
-- Verify `STRIPE_PRO_PRICE_ID` matches the price from the checkout
+- Verify `STRIPE_PLUS_PRICE_ID` or `STRIPE_PREMIUM_PRICE_ID` matches the price from the checkout
 - Check database subscriptions table
 
 ### Customer not created

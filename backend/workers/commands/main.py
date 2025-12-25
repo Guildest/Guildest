@@ -85,7 +85,7 @@ async def handle_message(message: QueueMessage, config: AppConfig, db: Optional[
                     f"- `{prefix}dashboard`",
                     f"- `{prefix}stats`",
                     f"- `{prefix}sentiment`",
-                    f"- `{prefix}modlogs` (Pro)",
+                    f"- `{prefix}modlogs` (Plus/Premium)",
                 ]
             ),
         )
@@ -97,7 +97,11 @@ async def handle_message(message: QueueMessage, config: AppConfig, db: Optional[
 
     if cmd == "dashboard":
         base = (config.frontend_base_url or "http://localhost:3000").rstrip("/")
-        await _reply(config, message, f"Dashboard: {base}\nConnect this server in the dashboard to enable Pro features.")
+        await _reply(
+            config,
+            message,
+            f"Dashboard: {base}\nConnect this server in the dashboard to enable paid features.",
+        )
         return
 
     if cmd == "stats":
@@ -123,8 +127,8 @@ async def handle_message(message: QueueMessage, config: AppConfig, db: Optional[
 
     if cmd in {"modlogs", "modlog"}:
         plan = await fetch_guild_plan(db, message.guild_id)
-        if plan != "pro":
-            await _reply(config, message, "Moderation log history is a Pro feature.")
+        if plan not in {"plus", "premium"}:
+            await _reply(config, message, "Moderation log history is a paid feature.")
             return
         rows = await fetch_moderation_logs(db, message.guild_id, limit=5)
         if not rows:
@@ -148,4 +152,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

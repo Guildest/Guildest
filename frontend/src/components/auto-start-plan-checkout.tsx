@@ -9,7 +9,7 @@ type Props = {
   redirectAfterLogin?: string;
 };
 
-export function AutoStartProCheckout({ enabled, plan = "plus", redirectAfterLogin }: Props) {
+export function AutoStartPlanCheckout({ enabled, plan = "plus", redirectAfterLogin }: Props) {
   const started = useRef(false);
 
   useEffect(() => {
@@ -34,4 +34,3 @@ export function AutoStartProCheckout({ enabled, plan = "plus", redirectAfterLogi
 
   return null;
 }
-

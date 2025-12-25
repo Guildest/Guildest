@@ -36,7 +36,6 @@ async def build_bot(config: GatewayConfig) -> hikari.GatewayBot:
         db = await create_pool(config.database_url)
         await init_db(db)
         logging.info("Discord gateway connected to database for slash commands")
-        bot.d["db"] = db
 
     @bot.listen(hikari.StartingEvent)
     async def on_starting(_: hikari.StartingEvent) -> None:
@@ -121,7 +120,7 @@ async def build_bot(config: GatewayConfig) -> hikari.GatewayBot:
                         "/dashboard",
                         "/stats",
                         "/sentiment",
-                        "/modlogs (Pro)",
+                        "/modlogs (Plus/Premium)",
                     ]
                 )
             )
@@ -137,20 +136,19 @@ async def build_bot(config: GatewayConfig) -> hikari.GatewayBot:
             await respond("This command can only be used in a server.")
             return
 
-        db2: Optional[Database] = bot.d.get("db") if hasattr(bot, "d") else None
-        if not db2:
+        if not db:
             await respond("Database not configured for this bot; set DATABASE_URL for DB-backed commands.")
             return
 
         if name == "stats":
             now = datetime.now(timezone.utc)
-            last_hour = await fetch_message_count_sum(db2, guild_id, now - timedelta(hours=1), now)
-            last_day = await fetch_message_count_sum(db2, guild_id, now - timedelta(hours=24), now)
+            last_hour = await fetch_message_count_sum(db, guild_id, now - timedelta(hours=1), now)
+            last_day = await fetch_message_count_sum(db, guild_id, now - timedelta(hours=24), now)
             await respond(f"Message stats:\n- last hour: {last_hour}\n- last 24h: {last_day}")
             return
 
         if name == "sentiment":
-            latest = await fetch_latest_sentiment(db2, guild_id)
+            latest = await fetch_latest_sentiment(db, guild_id)
             if not latest:
                 await respond("No sentiment data yet.")
                 return
@@ -160,12 +158,12 @@ async def build_bot(config: GatewayConfig) -> hikari.GatewayBot:
             return
 
         if name == "modlogs":
-            plan = await fetch_guild_plan(db2, guild_id)
-            if plan != "pro":
-                await respond("Moderation log history is a Pro feature.")
+            plan = await fetch_guild_plan(db, guild_id)
+            if plan not in {"plus", "premium"}:
+                await respond("Moderation log history is a paid feature.")
                 return
 
-            rows = await fetch_moderation_logs(db2, guild_id, limit=5)
+            rows = await fetch_moderation_logs(db, guild_id, limit=5)
             if not rows:
                 await respond("No moderation events yet.")
                 return

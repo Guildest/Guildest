@@ -2,6 +2,8 @@ import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Check, X, HelpCircle, Zap } from "lucide-react";
 import { LOGIN_URL } from "@/lib/api";
+import { backendFetch } from "@/lib/backend.server";
+import { MeResponse } from "@/lib/types";
 import {
   Card,
   CardContent,
@@ -10,8 +12,20 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { AutoStartProCheckout } from "@/components/auto-start-pro-checkout";
-import { CheckoutProButton } from "@/components/checkout-pro-button";
+import { AutoStartPlanCheckout } from "@/components/auto-start-plan-checkout";
+import { CheckoutPlanButton } from "@/components/checkout-plan-button";
+
+async function getMe(): Promise<MeResponse | null> {
+  try {
+    const res = await backendFetch("/me");
+    if (res.status === 401) return null;
+    if (!res.ok) throw new Error(`Failed to load /me (${res.status})`);
+    return await res.json();
+  } catch (error) {
+    console.error(error);
+    return null;
+  }
+}
 
 export default async function PricingPage(props: {
   searchParams?: Promise<{ [key: string]: string | string[] | undefined }>;
@@ -19,10 +33,17 @@ export default async function PricingPage(props: {
   const searchParams = await props.searchParams;
   const checkout = typeof searchParams?.checkout === "string" ? searchParams.checkout : undefined;
   const checkoutPlan = (checkout === "plus" || checkout === "premium") ? checkout : undefined;
+  const me = await getMe();
+  const displayName = me?.username || me?.user_id || "Account";
+  const avatarUrl =
+    me?.avatar && me?.user_id
+      ? `https://cdn.discordapp.com/avatars/${me.user_id}/${me.avatar}.png?size=96`
+      : null;
+  const dashboardHref = me ? "/dashboard" : LOGIN_URL;
 
   return (
     <div className="flex min-h-screen flex-col">
-      <AutoStartProCheckout enabled={!!checkoutPlan} plan={checkoutPlan} />
+      <AutoStartPlanCheckout enabled={!!checkoutPlan} plan={checkoutPlan} />
       <header className="px-6 h-16 flex items-center border-b fixed w-full bg-background/80 backdrop-blur-sm z-50">
         <div className="max-w-7xl w-full mx-auto flex items-center justify-between">
           <Link href="/" className="flex items-center gap-2 font-bold text-xl">
@@ -35,9 +56,29 @@ export default async function PricingPage(props: {
             <Link href="#" className="text-muted-foreground hover:text-foreground transition-colors">Documentation</Link>
           </nav>
           <div className="flex items-center gap-4">
-             <Link href={LOGIN_URL}>
-              <Button>Dashboard</Button>
-            </Link>
+            {me ? (
+              <Link href="/dashboard" className="flex items-center gap-3">
+                {avatarUrl ? (
+                  <img
+                    src={avatarUrl}
+                    alt={displayName}
+                    className="h-9 w-9 rounded-full border border-primary/40"
+                  />
+                ) : (
+                  <div className="flex h-9 w-9 items-center justify-center rounded-full bg-secondary text-sm font-semibold text-secondary-foreground">
+                    {displayName.charAt(0).toUpperCase()}
+                  </div>
+                )}
+                <div className="hidden sm:flex flex-col leading-tight">
+                  <span className="text-sm font-semibold">{displayName}</span>
+                  <span className="text-xs text-muted-foreground">Open dashboard</span>
+                </div>
+              </Link>
+            ) : (
+              <Link href={dashboardHref}>
+                <Button>Dashboard</Button>
+              </Link>
+            )}
           </div>
         </div>
       </header>
@@ -64,7 +105,7 @@ export default async function PricingPage(props: {
               </CardHeader>
               <CardContent className="flex-1 space-y-4">
                 <div className="text-3xl font-bold">$0 <span className="text-base font-normal text-muted-foreground">/mo</span></div>
-                <Link href={LOGIN_URL}>
+                <Link href={dashboardHref}>
                   <Button className="w-full" variant="outline">Get Started</Button>
                 </Link>
               </CardContent>
@@ -81,7 +122,7 @@ export default async function PricingPage(props: {
               </CardHeader>
               <CardContent className="flex-1 space-y-4">
                 <div className="text-3xl font-bold">$9 <span className="text-base font-normal text-muted-foreground">/mo</span></div>
-                <CheckoutProButton plan="plus" variant="secondary" label="Upgrade to Plus" redirectAfterLogin="/pricing?checkout=plus" />
+                <CheckoutPlanButton plan="plus" variant="secondary" label="Upgrade to Plus" redirectAfterLogin="/pricing?checkout=plus" />
               </CardContent>
             </Card>
 
@@ -93,7 +134,7 @@ export default async function PricingPage(props: {
               </CardHeader>
               <CardContent className="flex-1 space-y-4">
                 <div className="text-3xl font-bold">$25 <span className="text-base font-normal text-muted-foreground">/mo</span></div>
-                <CheckoutProButton plan="premium" label="Upgrade to Premium" redirectAfterLogin="/pricing?checkout=premium" />
+                <CheckoutPlanButton plan="premium" label="Upgrade to Premium" redirectAfterLogin="/pricing?checkout=premium" />
               </CardContent>
             </Card>
           </div>

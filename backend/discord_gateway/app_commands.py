@@ -23,7 +23,7 @@ def build_application_commands() -> list[dict[str, Any]]:
         {"name": "dashboard", "description": "Get the web dashboard link"},
         {"name": "stats", "description": "Message stats for this server (DB-backed)"},
         {"name": "sentiment", "description": "Latest sentiment snapshot (DB-backed)"},
-        {"name": "modlogs", "description": "Recent moderation events (Pro, DB-backed)"},
+        {"name": "modlogs", "description": "Recent moderation events (Plus/Premium, DB-backed)"},
     ]
 
 
@@ -52,4 +52,3 @@ async def register_application_commands(
         data = response.json()
 
     return CommandRegistrationResult(scope=scope, count=len(data) if isinstance(data, list) else 0)
-

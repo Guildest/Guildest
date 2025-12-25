@@ -1,16 +1,38 @@
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
-import { 
-  BarChart3, 
-  Shield, 
-  Bot, 
-  ArrowRight, 
+import {
+  BarChart3,
+  Shield,
+  Bot,
+  ArrowRight,
   CheckCircle2,
-  Zap
+  Zap,
 } from "lucide-react";
 import { LOGIN_URL } from "@/lib/api";
+import { backendFetch } from "@/lib/backend.server";
+import { MeResponse } from "@/lib/types";
 
-export default function Home() {
+async function getMe(): Promise<MeResponse | null> {
+  try {
+    const res = await backendFetch("/me");
+    if (res.status === 401) return null;
+    if (!res.ok) throw new Error(`Failed to load /me (${res.status})`);
+    return await res.json();
+  } catch (error) {
+    console.error(error);
+    return null;
+  }
+}
+
+export default async function Home() {
+  const me = await getMe();
+  const displayName = me?.username || me?.user_id || "Account";
+  const avatarUrl =
+    me?.avatar && me?.user_id
+      ? `https://cdn.discordapp.com/avatars/${me.user_id}/${me.avatar}.png?size=96`
+      : null;
+  const dashboardHref = me ? "/dashboard" : LOGIN_URL;
+
   return (
     <div className="flex min-h-screen flex-col">
       <header className="px-6 h-16 flex items-center border-b fixed w-full bg-background/80 backdrop-blur-sm z-50">
@@ -25,9 +47,29 @@ export default function Home() {
             <Link href="#" className="text-muted-foreground hover:text-foreground transition-colors">Documentation</Link>
           </nav>
           <div className="flex items-center gap-4">
-             <Link href={LOGIN_URL}>
-              <Button>Dashboard</Button>
-            </Link>
+            {me ? (
+              <Link href="/dashboard" className="flex items-center gap-3">
+                {avatarUrl ? (
+                  <img
+                    src={avatarUrl}
+                    alt={displayName}
+                    className="h-9 w-9 rounded-full border border-primary/40"
+                  />
+                ) : (
+                  <div className="flex h-9 w-9 items-center justify-center rounded-full bg-secondary text-sm font-semibold text-secondary-foreground">
+                    {displayName.charAt(0).toUpperCase()}
+                  </div>
+                )}
+                <div className="hidden sm:flex flex-col leading-tight">
+                  <span className="text-sm font-semibold">{displayName}</span>
+                  <span className="text-xs text-muted-foreground">Open dashboard</span>
+                </div>
+              </Link>
+            ) : (
+              <Link href={dashboardHref}>
+                <Button>Dashboard</Button>
+              </Link>
+            )}
           </div>
         </div>
       </header>
@@ -47,7 +89,7 @@ export default function Home() {
               Powerful analytics, advanced moderation, and sentiment analysis to help you build safer and more engaged communities.
             </p>
             <div className="flex flex-col sm:flex-row gap-4 pt-4">
-              <Link href={LOGIN_URL}>
+              <Link href={dashboardHref}>
                 <Button size="lg" className="h-12 px-8 text-base gap-2">
                   Get Started <ArrowRight className="h-4 w-4" />
                 </Button>
@@ -138,13 +180,13 @@ export default function Home() {
                 <Button className="w-full" variant="outline">Get Started</Button>
               </div>
 
-              {/* Pro Plan */}
+              {/* Plus Plan */}
               <div className="rounded-xl border border-primary p-8 space-y-6 relative overflow-hidden bg-card">
                 <div className="absolute top-0 right-0 bg-primary text-primary-foreground px-3 py-1 text-xs font-medium rounded-bl-lg">
                   POPULAR
                 </div>
                 <div className="space-y-2">
-                  <h3 className="text-2xl font-bold">Pro</h3>
+                  <h3 className="text-2xl font-bold">Plus</h3>
                   <p className="text-muted-foreground">For growing servers</p>
                 </div>
                 <div className="text-3xl font-bold">$9 <span className="text-base font-normal text-muted-foreground">/mo</span></div>
@@ -166,7 +208,7 @@ export default function Home() {
                     <span>Unlimited commands</span>
                   </li>
                 </ul>
-                <Button className="w-full">Upgrade to Pro</Button>
+                <Button className="w-full">Upgrade to Plus</Button>
               </div>
             </div>
           </div>
@@ -179,7 +221,7 @@ export default function Home() {
             <p className="text-primary-foreground/80 max-w-2xl mx-auto text-lg">
               Join thousands of other community managers using Guildest to build better Discord servers.
             </p>
-             <Link href={LOGIN_URL}>
+             <Link href={dashboardHref}>
               <Button size="lg" variant="secondary" className="h-14 px-8 text-lg font-semibold">
                 Start Dashboard <Zap className="ml-2 h-4 w-4" />
               </Button>

@@ -182,18 +182,20 @@ async def fetch_user_id_by_stripe_customer_id(db: Database, customer_id: str) ->
 async def fetch_guild_settings(db: Database, guild_id: str) -> GuildSettings:
     """Get settings; insert defaults if not present."""
 
-    query = """
+    insert_query = """
     INSERT INTO guild_settings (guild_id)
     VALUES (%(guild_id)s)
     ON CONFLICT (guild_id) DO NOTHING;
-
+    """
+    select_query = """
     SELECT guild_id, prefix, moderation_enabled, analytics_enabled, sentiment_enabled
     FROM guild_settings
     WHERE guild_id = %(guild_id)s;
     """
     async with db.pool.connection() as conn:
         async with conn.cursor() as cur:
-            await cur.execute(query, {"guild_id": guild_id})
+            await cur.execute(insert_query, {"guild_id": guild_id})
+            await cur.execute(select_query, {"guild_id": guild_id})
             row = await cur.fetchone()
             return GuildSettings(
                 guild_id=row[0],
@@ -205,7 +207,7 @@ async def fetch_guild_settings(db: Database, guild_id: str) -> GuildSettings:
 
 
 async def upsert_guild_settings(db: Database, settings: GuildSettings) -> GuildSettings:
-    query = """
+    upsert_query = """
     INSERT INTO guild_settings (guild_id, prefix, moderation_enabled, analytics_enabled, sentiment_enabled, updated_at)
     VALUES (%(guild_id)s, %(prefix)s, %(moderation_enabled)s, %(analytics_enabled)s, %(sentiment_enabled)s, NOW())
     ON CONFLICT (guild_id)
@@ -215,14 +217,15 @@ async def upsert_guild_settings(db: Database, settings: GuildSettings) -> GuildS
         analytics_enabled = EXCLUDED.analytics_enabled,
         sentiment_enabled = EXCLUDED.sentiment_enabled,
         updated_at = NOW();
-
+    """
+    select_query = """
     SELECT guild_id, prefix, moderation_enabled, analytics_enabled, sentiment_enabled
     FROM guild_settings WHERE guild_id = %(guild_id)s;
     """
     async with db.pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
-                query,
+                upsert_query,
                 {
                     "guild_id": settings.guild_id,
                     "prefix": settings.prefix,
@@ -231,6 +234,7 @@ async def upsert_guild_settings(db: Database, settings: GuildSettings) -> GuildS
                     "sentiment_enabled": settings.sentiment_enabled,
                 },
             )
+            await cur.execute(select_query, {"guild_id": settings.guild_id})
             row = await cur.fetchone()
             return GuildSettings(
                 guild_id=row[0],
@@ -322,6 +326,17 @@ async def upsert_user(db: Database, user_id: str, username: str, avatar: Optiona
     async with db.pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(query, {"user_id": user_id, "username": username, "avatar": avatar})
+
+
+async def fetch_user_profile(db: Database, user_id: str) -> Optional[dict[str, Any]]:
+    query = "SELECT username, avatar FROM users WHERE user_id = %(user_id)s;"
+    async with db.pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(query, {"user_id": user_id})
+            row = await cur.fetchone()
+            if not row:
+                return None
+            return {"username": row[0], "avatar": row[1]}
 
 
 async def ensure_subscription_row(db: Database, user_id: str) -> None:
@@ -530,6 +545,16 @@ async def connect_guild_to_user(db: Database, guild_id: str, billing_user_id: st
     ON CONFLICT (guild_id) DO UPDATE
       SET billing_user_id = EXCLUDED.billing_user_id,
           connected_at = NOW();
+    """
+    async with db.pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(query, {"guild_id": guild_id, "billing_user_id": billing_user_id})
+
+
+async def delete_guild_connection(db: Database, guild_id: str, billing_user_id: str) -> None:
+    query = """
+    DELETE FROM guild_accounts
+    WHERE guild_id = %(guild_id)s AND billing_user_id = %(billing_user_id)s;
     """
     async with db.pool.connection() as conn:
         async with conn.cursor() as cur:
