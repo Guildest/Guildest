@@ -84,7 +84,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       QUEUE_STREAM: guildest:events
       QUEUE_MAX_LENGTH: 5000
-      QUEUE_GROUP: guildest-workers
+      QUEUE_GROUP: guildest-analytics
       QUEUE_CONSUMER: analytics-1
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/postgres
     depends_on:
@@ -103,7 +103,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       QUEUE_STREAM: guildest:events
       QUEUE_MAX_LENGTH: 5000
-      QUEUE_GROUP: guildest-workers
+      QUEUE_GROUP: guildest-moderation
       QUEUE_CONSUMER: moderation-1
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/postgres
     depends_on:
@@ -121,7 +121,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       QUEUE_STREAM: guildest:events
       QUEUE_MAX_LENGTH: 5000
-      QUEUE_GROUP: guildest-workers
+      QUEUE_GROUP: guildest-sentiment
       QUEUE_CONSUMER: sentiment-1
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/postgres
     depends_on:
@@ -141,7 +141,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       QUEUE_STREAM: guildest:events
       QUEUE_MAX_LENGTH: 5000
-      QUEUE_GROUP: guildest-workers
+      QUEUE_GROUP: guildest-commands
       QUEUE_CONSUMER: commands-1
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/postgres
     depends_on:
@@ -149,6 +149,15 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+
+  docs:
+    image: node:20-slim
+    working_dir: /app/docs
+    command: ["sh", "-c", "npm install && npm run start -- --host 0.0.0.0 --port 3000"]
+    ports:
+      - "3001:3000"
+    volumes:
+      - ./docs:/app/docs
 
 volumes:
   pgdata:

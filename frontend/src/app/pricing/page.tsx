@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
-import { Check, X, HelpCircle, Zap } from "lucide-react";
+import { Check, X, HelpCircle, Zap, ChevronDown } from "lucide-react";
 import { LOGIN_URL } from "@/lib/api";
 import { backendFetch } from "@/lib/backend.server";
 import { MeResponse } from "@/lib/types";
@@ -53,7 +53,35 @@ export default async function PricingPage(props: {
           <nav className="hidden md:flex items-center gap-6 text-sm font-medium">
             <Link href="/#features" className="text-muted-foreground hover:text-foreground transition-colors">Features</Link>
             <Link href="/pricing" className="text-foreground transition-colors">Pricing</Link>
-            <Link href="#" className="text-muted-foreground hover:text-foreground transition-colors">Documentation</Link>
+            <div className="relative group">
+              <button
+                type="button"
+                className="flex items-center gap-1 rounded-full border border-muted-foreground/30 px-3 py-1 text-muted-foreground transition-colors hover:text-foreground hover:border-foreground/50"
+                aria-haspopup="menu"
+              >
+                Resources
+                <ChevronDown className="h-3 w-3" />
+              </button>
+              <div
+                className="absolute left-0 top-full z-50 mt-2 w-44 rounded-lg border bg-background/95 p-2 shadow-lg opacity-0 pointer-events-none transition group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto"
+                role="menu"
+              >
+                <Link
+                  href="/doc"
+                  className="block rounded-md px-3 py-2 text-sm text-muted-foreground hover:bg-muted/60 hover:text-foreground transition-colors"
+                  role="menuitem"
+                >
+                  Documentation
+                </Link>
+                <Link
+                  href="/doc/changelog"
+                  className="block rounded-md px-3 py-2 text-sm text-muted-foreground hover:bg-muted/60 hover:text-foreground transition-colors"
+                  role="menuitem"
+                >
+                  Changelog
+                </Link>
+              </div>
+            </div>
           </nav>
           <div className="flex items-center gap-4">
             {me ? (

@@ -43,12 +43,18 @@ from backend.database.db import (
     fetch_guild_settings,
     fetch_message_counts,
     fetch_message_count_sum,
+    fetch_message_bucket_counts,
     fetch_moderation_logs,
     fetch_guild_appeals,
     fetch_recent_moderation_count,
     fetch_sentiment_daily,
     fetch_sentiment_report,
     fetch_latest_sentiment,
+    fetch_voice_bucket_counts,
+    fetch_command_bucket_counts,
+    fetch_daily_summary,
+    fetch_top_channels,
+    fetch_top_commands,
     fetch_session_user_id,
     fetch_subscription_plan,
     fetch_guild_billing_user_id,
@@ -305,6 +311,16 @@ def _analytics_hours_limit(plan: str) -> int:
     return 24 * 7
 
 
+def _analytics_days_limit(plan: str) -> int:
+    return max(1, _analytics_hours_limit(plan) // 24)
+
+
+def _normalize_bucket_size(value: int) -> int:
+    if value in {60, 3600, 86400}:
+        return value
+    return 3600
+
+
 def _message_counts_limit(plan: str) -> int:
     if plan == "premium":
         return 5000
@@ -333,6 +349,126 @@ def _frontend_base_url() -> str:
     return (config.frontend_base_url or "http://localhost:3000").rstrip("/")
 
 
+async def _apply_subscription_update(db: Database, subscription: Dict[str, Any], user_id: Optional[str]) -> None:
+    customer_id = subscription.get("customer")
+    resolved_user_id = user_id or str(subscription.get("metadata", {}).get("user_id") or "") or None
+    if not resolved_user_id and customer_id:
+        resolved_user_id = await fetch_user_id_by_stripe_customer_id(db, str(customer_id))
+    if not resolved_user_id:
+        logging.warning("Stripe webhook: cannot map subscription to user (customer=%s)", customer_id)
+        return
+
+    if customer_id:
+        existing = await fetch_user_stripe_customer_id(db, resolved_user_id)
+        if not existing:
+            await set_user_stripe_customer_id(db, resolved_user_id, str(customer_id))
+
+    status = str(subscription.get("status") or "unknown")
+    cancel_at_period_end = bool(subscription.get("cancel_at_period_end") or False)
+
+    current_period_end = None
+    cpe = subscription.get("current_period_end")
+    if isinstance(cpe, (int, float)):
+        current_period_end = datetime.fromtimestamp(cpe, tz=timezone.utc)
+
+    price_id = None
+    items = (subscription.get("items") or {}).get("data") or []
+    if items and isinstance(items, list):
+        price = (items[0] or {}).get("price") if isinstance(items[0], dict) else None
+        if isinstance(price, dict):
+            price_id = price.get("id")
+
+    plan = "free"
+    if status in {"active", "trialing"}:
+        if price_id == config.stripe_plus_price_id:
+            plan = "plus"
+        elif price_id == config.stripe_premium_price_id:
+            plan = "premium"
+
+    await upsert_stripe_subscription(
+        db,
+        resolved_user_id,
+        plan=plan,
+        status=status,
+        stripe_subscription_id=str(subscription.get("id") or "") or None,
+        stripe_price_id=str(price_id) if price_id else None,
+        current_period_end=current_period_end,
+        cancel_at_period_end=cancel_at_period_end,
+    )
+
+
+async def _sync_subscription_if_needed(db: Database, user_id: str) -> None:
+    if not config.stripe_secret_key:
+        return
+
+    sub = await fetch_subscription(db, user_id)
+    stripe_subscription_id = sub.get("stripe_subscription_id")
+    if not stripe_subscription_id:
+        return
+
+    status = str(sub.get("status") or "unknown")
+    plan = str(sub.get("plan") or "free")
+    current_period_end = sub.get("current_period_end")
+    updated_at = sub.get("updated_at")
+    now = datetime.now(timezone.utc)
+
+    if status not in {"active", "trialing"} and plan != "free":
+        await upsert_stripe_subscription(
+            db,
+            user_id,
+            plan="free",
+            status=status,
+            stripe_subscription_id=stripe_subscription_id,
+            stripe_price_id=sub.get("stripe_price_id"),
+            current_period_end=current_period_end,
+            cancel_at_period_end=bool(sub.get("cancel_at_period_end")),
+        )
+        return
+
+    if current_period_end and current_period_end > now:
+        return
+
+    if updated_at and (now - updated_at) < timedelta(minutes=15):
+        return
+
+    stripe.api_key = config.stripe_secret_key
+    try:
+        subscription = await run_in_threadpool(
+            stripe.Subscription.retrieve,
+            str(stripe_subscription_id),
+            expand=["items.data.price"],
+        )
+        await _apply_subscription_update(db, dict(subscription), user_id)
+        return
+    except Exception as exc:  # noqa: BLE001
+        logging.warning(
+            "Stripe refresh failed for user=%s subscription=%s: %s",
+            user_id,
+            stripe_subscription_id,
+            exc,
+        )
+
+    if current_period_end and current_period_end <= now:
+        await upsert_stripe_subscription(
+            db,
+            user_id,
+            plan="free",
+            status="expired",
+            stripe_subscription_id=stripe_subscription_id,
+            stripe_price_id=sub.get("stripe_price_id"),
+            current_period_end=current_period_end,
+            cancel_at_period_end=bool(sub.get("cancel_at_period_end")),
+        )
+
+
+async def _resolve_guild_plan(request: Request, guild_id: str) -> str:
+    db: Database = request.app.state.db
+    billing_user_id = await fetch_guild_billing_user_id(db, guild_id)
+    if billing_user_id:
+        await _sync_subscription_if_needed(db, billing_user_id)
+    return await fetch_guild_plan(db, guild_id)
+
+
 async def _require_user_id(request: Request) -> str:
     secret = _require_session_secret()
 
@@ -353,6 +489,10 @@ async def _require_user_id(request: Request) -> str:
     user_id = await fetch_session_user_id(db, parsed.session_id)
     if not user_id:
         raise HTTPException(status_code=401, detail="session expired")
+    try:
+        await _sync_subscription_if_needed(db, user_id)
+    except Exception as exc:  # noqa: BLE001
+        logging.warning("Subscription refresh failed for user=%s: %s", user_id, exc)
     return user_id
 
 
@@ -713,7 +853,7 @@ async def summarize_appeal(guild_id: str, appeal_id: str, request: Request) -> D
     if not appeal or appeal["guild_id"] != guild_id:
         raise HTTPException(status_code=404, detail="appeal not found")
 
-    plan = await fetch_guild_plan(db, guild_id)
+    plan = await _resolve_guild_plan(request, guild_id)
     if plan not in {"plus", "premium"}:
         raise HTTPException(status_code=403, detail="appeal summaries require Plus or Premium")
 
@@ -742,7 +882,7 @@ async def summarize_appeal(guild_id: str, appeal_id: str, request: Request) -> D
 async def dashboard_overview(guild_id: str, request: Request) -> Dict[str, Any]:
     await _require_guild_access(request, guild_id)
     db: Database = request.app.state.db
-    plan = await fetch_guild_plan(db, guild_id)
+    plan = await _resolve_guild_plan(request, guild_id)
     paid = _is_paid_plan(plan)
 
     # Fetch stats
@@ -801,13 +941,183 @@ async def analytics_message_counts(guild_id: str, request: Request, hours: int =
     settings = await fetch_guild_settings(db, guild_id)
     if not settings.analytics_enabled:
         raise HTTPException(status_code=403, detail="analytics disabled for guild")
-    plan = await fetch_guild_plan(db, guild_id)
+    plan = await _resolve_guild_plan(request, guild_id)
 
     hours = max(1, min(hours, _analytics_hours_limit(plan)))
     to_ts = datetime.now(timezone.utc)
     from_ts = to_ts - timedelta(hours=hours)
     points = await fetch_message_counts(db, guild_id, from_ts, to_ts, limit=_message_counts_limit(plan))
     return {"guild_id": guild_id, "from": from_ts.isoformat(), "to": to_ts.isoformat(), "points": points}
+
+
+@app.get("/guilds/{guild_id}/analytics/message-buckets")
+async def analytics_message_buckets(
+    guild_id: str,
+    request: Request,
+    hours: int = 24,
+    bucket_size: int = 3600,
+    channel_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    await _require_guild_access(request, guild_id)
+    db: Database = request.app.state.db
+    settings = await fetch_guild_settings(db, guild_id)
+    if not settings.analytics_enabled:
+        raise HTTPException(status_code=403, detail="analytics disabled for guild")
+    plan = await _resolve_guild_plan(request, guild_id)
+
+    hours = max(1, min(hours, _analytics_hours_limit(plan)))
+    bucket_size = _normalize_bucket_size(bucket_size)
+    to_ts = datetime.now(timezone.utc)
+    from_ts = to_ts - timedelta(hours=hours)
+    channel_id = channel_id.strip() if channel_id else None
+    points = await fetch_message_bucket_counts(
+        db,
+        guild_id,
+        from_ts,
+        to_ts,
+        bucket_size=bucket_size,
+        channel_id=channel_id,
+    )
+    return {
+        "guild_id": guild_id,
+        "from": from_ts.isoformat(),
+        "to": to_ts.isoformat(),
+        "bucket_size": bucket_size,
+        "channel_id": channel_id,
+        "points": points,
+    }
+
+
+@app.get("/guilds/{guild_id}/analytics/summary")
+async def analytics_summary(guild_id: str, request: Request, days: int = 30) -> Dict[str, Any]:
+    await _require_guild_access(request, guild_id)
+    db: Database = request.app.state.db
+    settings = await fetch_guild_settings(db, guild_id)
+    if not settings.analytics_enabled:
+        raise HTTPException(status_code=403, detail="analytics disabled for guild")
+    plan = await _resolve_guild_plan(request, guild_id)
+
+    days = max(1, min(days, _analytics_days_limit(plan)))
+    to_day = datetime.now(timezone.utc)
+    from_day = to_day - timedelta(days=days)
+    points = await fetch_daily_summary(db, guild_id, from_day, to_day)
+    return {"guild_id": guild_id, "from": from_day.date().isoformat(), "to": to_day.date().isoformat(), "points": points}
+
+
+@app.get("/guilds/{guild_id}/analytics/voice")
+async def analytics_voice(
+    guild_id: str,
+    request: Request,
+    hours: int = 24,
+    bucket_size: int = 3600,
+) -> Dict[str, Any]:
+    await _require_guild_access(request, guild_id)
+    db: Database = request.app.state.db
+    settings = await fetch_guild_settings(db, guild_id)
+    if not settings.analytics_enabled:
+        raise HTTPException(status_code=403, detail="analytics disabled for guild")
+    plan = await _resolve_guild_plan(request, guild_id)
+
+    hours = max(1, min(hours, _analytics_hours_limit(plan)))
+    bucket_size = _normalize_bucket_size(bucket_size)
+    to_ts = datetime.now(timezone.utc)
+    from_ts = to_ts - timedelta(hours=hours)
+    points = await fetch_voice_bucket_counts(db, guild_id, from_ts, to_ts, bucket_size=bucket_size)
+    return {
+        "guild_id": guild_id,
+        "from": from_ts.isoformat(),
+        "to": to_ts.isoformat(),
+        "bucket_size": bucket_size,
+        "points": points,
+    }
+
+
+@app.get("/guilds/{guild_id}/analytics/commands")
+async def analytics_commands(
+    guild_id: str,
+    request: Request,
+    hours: int = 24,
+    bucket_size: int = 3600,
+) -> Dict[str, Any]:
+    await _require_guild_access(request, guild_id)
+    db: Database = request.app.state.db
+    settings = await fetch_guild_settings(db, guild_id)
+    if not settings.analytics_enabled:
+        raise HTTPException(status_code=403, detail="analytics disabled for guild")
+    plan = await _resolve_guild_plan(request, guild_id)
+
+    hours = max(1, min(hours, _analytics_hours_limit(plan)))
+    bucket_size = _normalize_bucket_size(bucket_size)
+    to_ts = datetime.now(timezone.utc)
+    from_ts = to_ts - timedelta(hours=hours)
+    points = await fetch_command_bucket_counts(db, guild_id, from_ts, to_ts, bucket_size=bucket_size)
+    return {
+        "guild_id": guild_id,
+        "from": from_ts.isoformat(),
+        "to": to_ts.isoformat(),
+        "bucket_size": bucket_size,
+        "points": points,
+    }
+
+
+@app.get("/guilds/{guild_id}/analytics/top-channels")
+async def analytics_top_channels(
+    guild_id: str,
+    request: Request,
+    hours: int = 24,
+    limit: int = 10,
+    bucket_size: int = 3600,
+) -> Dict[str, Any]:
+    await _require_guild_access(request, guild_id)
+    db: Database = request.app.state.db
+    settings = await fetch_guild_settings(db, guild_id)
+    if not settings.analytics_enabled:
+        raise HTTPException(status_code=403, detail="analytics disabled for guild")
+    plan = await _resolve_guild_plan(request, guild_id)
+
+    hours = max(1, min(hours, _analytics_hours_limit(plan)))
+    bucket_size = _normalize_bucket_size(bucket_size)
+    limit = max(1, min(limit, 25))
+    to_ts = datetime.now(timezone.utc)
+    from_ts = to_ts - timedelta(hours=hours)
+    points = await fetch_top_channels(db, guild_id, from_ts, to_ts, bucket_size=bucket_size, limit=limit)
+    return {
+        "guild_id": guild_id,
+        "from": from_ts.isoformat(),
+        "to": to_ts.isoformat(),
+        "limit": limit,
+        "points": points,
+    }
+
+
+@app.get("/guilds/{guild_id}/analytics/top-commands")
+async def analytics_top_commands(
+    guild_id: str,
+    request: Request,
+    hours: int = 24,
+    limit: int = 10,
+    bucket_size: int = 3600,
+) -> Dict[str, Any]:
+    await _require_guild_access(request, guild_id)
+    db: Database = request.app.state.db
+    settings = await fetch_guild_settings(db, guild_id)
+    if not settings.analytics_enabled:
+        raise HTTPException(status_code=403, detail="analytics disabled for guild")
+    plan = await _resolve_guild_plan(request, guild_id)
+
+    hours = max(1, min(hours, _analytics_hours_limit(plan)))
+    bucket_size = _normalize_bucket_size(bucket_size)
+    limit = max(1, min(limit, 25))
+    to_ts = datetime.now(timezone.utc)
+    from_ts = to_ts - timedelta(hours=hours)
+    points = await fetch_top_commands(db, guild_id, from_ts, to_ts, bucket_size=bucket_size, limit=limit)
+    return {
+        "guild_id": guild_id,
+        "from": from_ts.isoformat(),
+        "to": to_ts.isoformat(),
+        "limit": limit,
+        "points": points,
+    }
 
 
 @app.get("/guilds/{guild_id}/sentiment/daily")
@@ -817,7 +1127,7 @@ async def sentiment_daily(guild_id: str, request: Request, days: int = 30) -> Di
     settings = await fetch_guild_settings(db, guild_id)
     if not settings.sentiment_enabled:
         raise HTTPException(status_code=403, detail="sentiment disabled for guild")
-    plan = await fetch_guild_plan(db, guild_id)
+    plan = await _resolve_guild_plan(request, guild_id)
     if not _is_paid_plan(plan):
         raise HTTPException(status_code=402, detail="sentiment tracking requires a paid plan")
 
@@ -835,7 +1145,7 @@ async def sentiment_report(guild_id: str, request: Request, day: Optional[str] =
     settings = await fetch_guild_settings(db, guild_id)
     if not settings.sentiment_enabled:
         raise HTTPException(status_code=403, detail="sentiment disabled for guild")
-    plan = await fetch_guild_plan(db, guild_id)
+    plan = await _resolve_guild_plan(request, guild_id)
     if not _is_paid_plan(plan):
         raise HTTPException(status_code=402, detail="sentiment report requires a paid plan")
 
@@ -868,7 +1178,7 @@ async def moderation_logs(
     settings = await fetch_guild_settings(db, guild_id)
     if not settings.moderation_enabled:
         raise HTTPException(status_code=403, detail="moderation disabled for guild")
-    plan = await fetch_guild_plan(db, guild_id)
+    plan = await _resolve_guild_plan(request, guild_id)
     if not _is_paid_plan(plan):
         raise HTTPException(status_code=402, detail="moderation log history requires a paid plan")
 
@@ -971,59 +1281,6 @@ async def webhook_stripe(request: Request) -> Dict[str, Any]:
 
     db: Database = request.app.state.db
 
-    async def resolve_user_id_from_customer(customer_id: Optional[str]) -> Optional[str]:
-        if not customer_id:
-            return None
-        return await fetch_user_id_by_stripe_customer_id(db, customer_id)
-
-    async def apply_subscription_update(subscription: Dict[str, Any], user_id: Optional[str]) -> None:
-        customer_id = subscription.get("customer")
-        if not user_id:
-            user_id = str(subscription.get("metadata", {}).get("user_id") or "") or None
-        if not user_id:
-            user_id = await resolve_user_id_from_customer(str(customer_id) if customer_id else None)
-        if not user_id:
-            logging.warning("Stripe webhook: cannot map subscription to user (customer=%s)", customer_id)
-            return
-
-        if customer_id:
-            existing = await fetch_user_stripe_customer_id(db, user_id)
-            if not existing:
-                await set_user_stripe_customer_id(db, user_id, str(customer_id))
-
-        status = str(subscription.get("status") or "unknown")
-        cancel_at_period_end = bool(subscription.get("cancel_at_period_end") or False)
-
-        current_period_end = None
-        cpe = subscription.get("current_period_end")
-        if isinstance(cpe, (int, float)):
-            current_period_end = datetime.fromtimestamp(cpe, tz=timezone.utc)
-
-        price_id = None
-        items = (subscription.get("items") or {}).get("data") or []
-        if items and isinstance(items, list):
-            price = (items[0] or {}).get("price") if isinstance(items[0], dict) else None
-            if isinstance(price, dict):
-                price_id = price.get("id")
-
-        plan = "free"
-        if status in {"active", "trialing"}:
-            if price_id == config.stripe_plus_price_id:
-                plan = "plus"
-            elif price_id == config.stripe_premium_price_id:
-                plan = "premium"
-
-        await upsert_stripe_subscription(
-            db,
-            user_id,
-            plan=plan,
-            status=status,
-            stripe_subscription_id=str(subscription.get("id") or "") or None,
-            stripe_price_id=str(price_id) if price_id else None,
-            current_period_end=current_period_end,
-            cancel_at_period_end=cancel_at_period_end,
-        )
-
     if event_type == "checkout.session.completed":
         if data_object.get("mode") == "subscription":
             user_id = str(data_object.get("client_reference_id") or "") or None
@@ -1041,7 +1298,7 @@ async def webhook_stripe(request: Request) -> Dict[str, Any]:
                     subscription_id,
                     expand=["items.data.price"],
                 )
-                await apply_subscription_update(dict(subscription), user_id)
+                await _apply_subscription_update(db, dict(subscription), user_id)
 
     if event_type in {"customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted"}:
         subscription = dict(data_object)
@@ -1053,7 +1310,7 @@ async def webhook_stripe(request: Request) -> Dict[str, Any]:
                     expand=["items.data.price"],
                 )
             )
-        await apply_subscription_update(subscription, None)
+        await _apply_subscription_update(db, subscription, None)
 
     return {"received": True}
 

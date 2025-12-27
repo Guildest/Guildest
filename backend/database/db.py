@@ -17,6 +17,9 @@ DEFAULT_WARN_POLICY = [
     {"threshold": 5, "action": "ban"},
 ]
 
+# Sentinel value for guild-level rollups in analytics bucket tables.
+GUILD_CHANNEL_ID = "__guild__"
+
 
 @dataclass
 class Database:
@@ -102,6 +105,68 @@ async def init_db(db: Database) -> None:
         count BIGINT NOT NULL DEFAULT 0,
         PRIMARY KEY (time_bucket, guild_id)
     );
+
+    CREATE TABLE IF NOT EXISTS analytics_message_bucket (
+        bucket_start TIMESTAMPTZ NOT NULL,
+        bucket_size INT NOT NULL,
+        guild_id TEXT NOT NULL,
+        channel_id TEXT,
+        message_count BIGINT NOT NULL DEFAULT 0,
+        delete_count BIGINT NOT NULL DEFAULT 0,
+        attachment_count BIGINT NOT NULL DEFAULT 0,
+        total_content_len BIGINT NOT NULL DEFAULT 0,
+        unique_speakers_est BIGINT,
+        PRIMARY KEY (bucket_start, bucket_size, guild_id, channel_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS analytics_message_bucket_guild_idx
+      ON analytics_message_bucket (guild_id, bucket_size, bucket_start DESC);
+    CREATE INDEX IF NOT EXISTS analytics_message_bucket_channel_idx
+      ON analytics_message_bucket (guild_id, channel_id, bucket_size, bucket_start DESC);
+
+    CREATE TABLE IF NOT EXISTS analytics_voice_bucket (
+        bucket_start TIMESTAMPTZ NOT NULL,
+        bucket_size INT NOT NULL,
+        guild_id TEXT NOT NULL,
+        channel_id TEXT,
+        join_count BIGINT NOT NULL DEFAULT 0,
+        leave_count BIGINT NOT NULL DEFAULT 0,
+        total_seconds BIGINT NOT NULL DEFAULT 0,
+        peak_concurrent INT NOT NULL DEFAULT 0,
+        unique_listeners_est BIGINT,
+        PRIMARY KEY (bucket_start, bucket_size, guild_id, channel_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS analytics_voice_bucket_guild_idx
+      ON analytics_voice_bucket (guild_id, bucket_size, bucket_start DESC);
+
+    CREATE TABLE IF NOT EXISTS analytics_command_bucket (
+        bucket_start TIMESTAMPTZ NOT NULL,
+        bucket_size INT NOT NULL,
+        guild_id TEXT NOT NULL,
+        command_name TEXT NOT NULL,
+        use_count BIGINT NOT NULL DEFAULT 0,
+        error_count BIGINT NOT NULL DEFAULT 0,
+        PRIMARY KEY (bucket_start, bucket_size, guild_id, command_name)
+    );
+
+    CREATE INDEX IF NOT EXISTS analytics_command_bucket_guild_idx
+      ON analytics_command_bucket (guild_id, bucket_size, bucket_start DESC);
+
+    CREATE TABLE IF NOT EXISTS analytics_daily_summary (
+        day DATE NOT NULL,
+        guild_id TEXT NOT NULL,
+        messages BIGINT NOT NULL DEFAULT 0,
+        active_channels INT NOT NULL DEFAULT 0,
+        dau_est BIGINT,
+        wau_est BIGINT,
+        mau_est BIGINT,
+        voice_minutes BIGINT NOT NULL DEFAULT 0,
+        PRIMARY KEY (day, guild_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS analytics_daily_summary_guild_idx
+      ON analytics_daily_summary (guild_id, day DESC);
 
     CREATE TABLE IF NOT EXISTS analytics_sentiment (
         day DATE NOT NULL,
@@ -819,6 +884,183 @@ async def bump_message_count(db: Database, message: QueueMessage) -> None:
             await cur.execute(query, {"time_bucket": bucket, "guild_id": message.guild_id})
 
 
+async def upsert_message_count_deltas(db: Database, rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        return
+    query = """
+    INSERT INTO analytics_message_counts (time_bucket, guild_id, count)
+    VALUES (%(time_bucket)s, %(guild_id)s, %(count)s)
+    ON CONFLICT (time_bucket, guild_id) DO UPDATE
+      SET count = analytics_message_counts.count + EXCLUDED.count;
+    """
+    async with db.pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.executemany(query, rows)
+
+
+async def upsert_message_bucket_deltas(db: Database, rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        return
+    query = """
+    INSERT INTO analytics_message_bucket (
+        bucket_start,
+        bucket_size,
+        guild_id,
+        channel_id,
+        message_count,
+        delete_count,
+        attachment_count,
+        total_content_len,
+        unique_speakers_est
+    )
+    VALUES (
+        %(bucket_start)s,
+        %(bucket_size)s,
+        %(guild_id)s,
+        %(channel_id)s,
+        %(message_count)s,
+        %(delete_count)s,
+        %(attachment_count)s,
+        %(total_content_len)s,
+        %(unique_speakers_est)s
+    )
+    ON CONFLICT (bucket_start, bucket_size, guild_id, channel_id) DO UPDATE
+      SET message_count = analytics_message_bucket.message_count + EXCLUDED.message_count,
+          delete_count = analytics_message_bucket.delete_count + EXCLUDED.delete_count,
+          attachment_count = analytics_message_bucket.attachment_count + EXCLUDED.attachment_count,
+          total_content_len = analytics_message_bucket.total_content_len + EXCLUDED.total_content_len,
+          unique_speakers_est = COALESCE(
+              EXCLUDED.unique_speakers_est,
+              analytics_message_bucket.unique_speakers_est
+          );
+    """
+    async with db.pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.executemany(query, rows)
+
+
+async def upsert_voice_bucket_deltas(db: Database, rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        return
+    query = """
+    INSERT INTO analytics_voice_bucket (
+        bucket_start,
+        bucket_size,
+        guild_id,
+        channel_id,
+        join_count,
+        leave_count,
+        total_seconds,
+        peak_concurrent,
+        unique_listeners_est
+    )
+    VALUES (
+        %(bucket_start)s,
+        %(bucket_size)s,
+        %(guild_id)s,
+        %(channel_id)s,
+        %(join_count)s,
+        %(leave_count)s,
+        %(total_seconds)s,
+        %(peak_concurrent)s,
+        %(unique_listeners_est)s
+    )
+    ON CONFLICT (bucket_start, bucket_size, guild_id, channel_id) DO UPDATE
+      SET join_count = analytics_voice_bucket.join_count + EXCLUDED.join_count,
+          leave_count = analytics_voice_bucket.leave_count + EXCLUDED.leave_count,
+          total_seconds = analytics_voice_bucket.total_seconds + EXCLUDED.total_seconds,
+          peak_concurrent = GREATEST(
+              analytics_voice_bucket.peak_concurrent,
+              EXCLUDED.peak_concurrent
+          ),
+          unique_listeners_est = COALESCE(
+              EXCLUDED.unique_listeners_est,
+              analytics_voice_bucket.unique_listeners_est
+          );
+    """
+    async with db.pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.executemany(query, rows)
+
+
+async def upsert_command_bucket_deltas(db: Database, rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        return
+    query = """
+    INSERT INTO analytics_command_bucket (
+        bucket_start,
+        bucket_size,
+        guild_id,
+        command_name,
+        use_count,
+        error_count
+    )
+    VALUES (
+        %(bucket_start)s,
+        %(bucket_size)s,
+        %(guild_id)s,
+        %(command_name)s,
+        %(use_count)s,
+        %(error_count)s
+    )
+    ON CONFLICT (bucket_start, bucket_size, guild_id, command_name) DO UPDATE
+      SET use_count = analytics_command_bucket.use_count + EXCLUDED.use_count,
+          error_count = analytics_command_bucket.error_count + EXCLUDED.error_count;
+    """
+    async with db.pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.executemany(query, rows)
+
+
+async def upsert_daily_summary_deltas(db: Database, rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        return
+    query = """
+    INSERT INTO analytics_daily_summary (
+        day,
+        guild_id,
+        messages,
+        active_channels,
+        dau_est,
+        wau_est,
+        mau_est,
+        voice_minutes
+    )
+    VALUES (
+        %(day)s,
+        %(guild_id)s,
+        %(messages)s,
+        %(active_channels)s,
+        %(dau_est)s,
+        %(wau_est)s,
+        %(mau_est)s,
+        %(voice_minutes)s
+    )
+    ON CONFLICT (day, guild_id) DO UPDATE
+      SET messages = analytics_daily_summary.messages + EXCLUDED.messages,
+          voice_minutes = analytics_daily_summary.voice_minutes + EXCLUDED.voice_minutes,
+          active_channels = GREATEST(
+              analytics_daily_summary.active_channels,
+              EXCLUDED.active_channels
+          ),
+          dau_est = CASE
+              WHEN EXCLUDED.dau_est IS NULL THEN analytics_daily_summary.dau_est
+              ELSE GREATEST(analytics_daily_summary.dau_est, EXCLUDED.dau_est)
+          END,
+          wau_est = CASE
+              WHEN EXCLUDED.wau_est IS NULL THEN analytics_daily_summary.wau_est
+              ELSE GREATEST(analytics_daily_summary.wau_est, EXCLUDED.wau_est)
+          END,
+          mau_est = CASE
+              WHEN EXCLUDED.mau_est IS NULL THEN analytics_daily_summary.mau_est
+              ELSE GREATEST(analytics_daily_summary.mau_est, EXCLUDED.mau_est)
+          END;
+    """
+    async with db.pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.executemany(query, rows)
+
+
 async def record_sentiment(db: Database, guild_id: str, day: datetime, sentiment: str) -> None:
     query = """
     INSERT INTO analytics_sentiment (day, guild_id, sentiment)
@@ -909,7 +1151,13 @@ async def fetch_subscription_plan(db: Database, user_id: str) -> str:
 async def fetch_subscription(db: Database, user_id: str) -> dict[str, Any]:
     await ensure_subscription_row(db, user_id)
     query = """
-    SELECT plan, status, stripe_subscription_id, stripe_price_id, current_period_end, cancel_at_period_end
+    SELECT plan,
+           status,
+           stripe_subscription_id,
+           stripe_price_id,
+           current_period_end,
+           cancel_at_period_end,
+           updated_at
     FROM subscriptions
     WHERE user_id = %(user_id)s;
     """
@@ -925,6 +1173,7 @@ async def fetch_subscription(db: Database, user_id: str) -> dict[str, Any]:
                     "stripe_price_id": None,
                     "current_period_end": None,
                     "cancel_at_period_end": False,
+                    "updated_at": None,
                 }
             return {
                 "plan": row[0],
@@ -933,6 +1182,7 @@ async def fetch_subscription(db: Database, user_id: str) -> dict[str, Any]:
                 "stripe_price_id": row[3],
                 "current_period_end": row[4],
                 "cancel_at_period_end": row[5],
+                "updated_at": row[6],
             }
 
 
@@ -1221,6 +1471,237 @@ async def fetch_message_counts(
             )
             rows = await cur.fetchall()
             return [{"time_bucket": row[0].isoformat(), "count": int(row[1])} for row in rows]
+
+
+async def fetch_message_bucket_counts(
+    db: Database,
+    guild_id: str,
+    from_ts: datetime,
+    to_ts: datetime,
+    bucket_size: int,
+    channel_id: Optional[str] = None,
+    limit: int = 5000,
+) -> list[dict[str, Any]]:
+    channel_key = channel_id or GUILD_CHANNEL_ID
+    query = """
+    SELECT bucket_start, message_count
+    FROM analytics_message_bucket
+    WHERE guild_id = %(guild_id)s
+      AND bucket_size = %(bucket_size)s
+      AND bucket_start >= %(from_ts)s
+      AND bucket_start <= %(to_ts)s
+      AND channel_id = %(channel_id)s
+    ORDER BY bucket_start ASC
+    LIMIT %(limit)s;
+    """
+    async with db.pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                query,
+                {
+                    "guild_id": guild_id,
+                    "bucket_size": bucket_size,
+                    "from_ts": from_ts,
+                    "to_ts": to_ts,
+                    "channel_id": channel_key,
+                    "limit": limit,
+                },
+            )
+            rows = await cur.fetchall()
+            return [{"bucket_start": row[0].isoformat(), "count": int(row[1])} for row in rows]
+
+
+async def fetch_voice_bucket_counts(
+    db: Database,
+    guild_id: str,
+    from_ts: datetime,
+    to_ts: datetime,
+    bucket_size: int,
+    limit: int = 5000,
+) -> list[dict[str, Any]]:
+    query = """
+    SELECT bucket_start, total_seconds, peak_concurrent
+    FROM analytics_voice_bucket
+    WHERE guild_id = %(guild_id)s
+      AND bucket_size = %(bucket_size)s
+      AND channel_id = %(channel_id)s
+      AND bucket_start >= %(from_ts)s
+      AND bucket_start <= %(to_ts)s
+    ORDER BY bucket_start ASC
+    LIMIT %(limit)s;
+    """
+    async with db.pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                query,
+                {
+                    "guild_id": guild_id,
+                    "bucket_size": bucket_size,
+                    "from_ts": from_ts,
+                    "to_ts": to_ts,
+                    "channel_id": GUILD_CHANNEL_ID,
+                    "limit": limit,
+                },
+            )
+            rows = await cur.fetchall()
+            return [
+                {
+                    "bucket_start": row[0].isoformat(),
+                    "total_seconds": int(row[1] or 0),
+                    "peak_concurrent": int(row[2] or 0),
+                }
+                for row in rows
+            ]
+
+
+async def fetch_command_bucket_counts(
+    db: Database,
+    guild_id: str,
+    from_ts: datetime,
+    to_ts: datetime,
+    bucket_size: int,
+    limit: int = 5000,
+) -> list[dict[str, Any]]:
+    query = """
+    SELECT bucket_start, SUM(use_count) AS count
+    FROM analytics_command_bucket
+    WHERE guild_id = %(guild_id)s
+      AND bucket_size = %(bucket_size)s
+      AND bucket_start >= %(from_ts)s
+      AND bucket_start <= %(to_ts)s
+    GROUP BY bucket_start
+    ORDER BY bucket_start ASC
+    LIMIT %(limit)s;
+    """
+    async with db.pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                query,
+                {
+                    "guild_id": guild_id,
+                    "bucket_size": bucket_size,
+                    "from_ts": from_ts,
+                    "to_ts": to_ts,
+                    "limit": limit,
+                },
+            )
+            rows = await cur.fetchall()
+            return [{"bucket_start": row[0].isoformat(), "count": int(row[1] or 0)} for row in rows]
+
+
+async def fetch_daily_summary(
+    db: Database,
+    guild_id: str,
+    from_day: datetime,
+    to_day: datetime,
+    limit: int = 400,
+) -> list[dict[str, Any]]:
+    query = """
+    SELECT day, messages, voice_minutes, active_channels, dau_est, wau_est, mau_est
+    FROM analytics_daily_summary
+    WHERE guild_id = %(guild_id)s
+      AND day >= %(from_day)s
+      AND day <= %(to_day)s
+    ORDER BY day ASC
+    LIMIT %(limit)s;
+    """
+    async with db.pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                query,
+                {
+                    "guild_id": guild_id,
+                    "from_day": from_day.date(),
+                    "to_day": to_day.date(),
+                    "limit": limit,
+                },
+            )
+            rows = await cur.fetchall()
+            return [
+                {
+                    "day": row[0].isoformat(),
+                    "messages": int(row[1] or 0),
+                    "voice_minutes": int(row[2] or 0),
+                    "active_channels": int(row[3] or 0),
+                    "dau_est": int(row[4]) if row[4] is not None else None,
+                    "wau_est": int(row[5]) if row[5] is not None else None,
+                    "mau_est": int(row[6]) if row[6] is not None else None,
+                }
+                for row in rows
+            ]
+
+
+async def fetch_top_channels(
+    db: Database,
+    guild_id: str,
+    from_ts: datetime,
+    to_ts: datetime,
+    bucket_size: int,
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    query = """
+    SELECT channel_id, SUM(message_count) AS count
+    FROM analytics_message_bucket
+    WHERE guild_id = %(guild_id)s
+      AND bucket_size = %(bucket_size)s
+      AND channel_id IS NOT NULL
+      AND channel_id != %(guild_channel_id)s
+      AND bucket_start >= %(from_ts)s
+      AND bucket_start <= %(to_ts)s
+    GROUP BY channel_id
+    ORDER BY count DESC
+    LIMIT %(limit)s;
+    """
+    async with db.pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                query,
+                {
+                    "guild_id": guild_id,
+                    "bucket_size": bucket_size,
+                    "from_ts": from_ts,
+                    "to_ts": to_ts,
+                    "limit": limit,
+                    "guild_channel_id": GUILD_CHANNEL_ID,
+                },
+            )
+            rows = await cur.fetchall()
+            return [{"channel_id": row[0], "count": int(row[1] or 0)} for row in rows]
+
+
+async def fetch_top_commands(
+    db: Database,
+    guild_id: str,
+    from_ts: datetime,
+    to_ts: datetime,
+    bucket_size: int,
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    query = """
+    SELECT command_name, SUM(use_count) AS count
+    FROM analytics_command_bucket
+    WHERE guild_id = %(guild_id)s
+      AND bucket_size = %(bucket_size)s
+      AND bucket_start >= %(from_ts)s
+      AND bucket_start <= %(to_ts)s
+    GROUP BY command_name
+    ORDER BY count DESC
+    LIMIT %(limit)s;
+    """
+    async with db.pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                query,
+                {
+                    "guild_id": guild_id,
+                    "bucket_size": bucket_size,
+                    "from_ts": from_ts,
+                    "to_ts": to_ts,
+                    "limit": limit,
+                },
+            )
+            rows = await cur.fetchall()
+            return [{"command_name": row[0], "count": int(row[1] or 0)} for row in rows]
 
 
 async def fetch_sentiment_daily(

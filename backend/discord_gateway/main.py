@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 import hikari
@@ -9,37 +9,24 @@ import hikari
 from .config import GatewayConfig
 from .app_commands import build_application_commands, register_application_commands
 from .publisher import QueuePublisher
-from backend.common.discord_rest import (
-    ban_member,
-    create_dm_channel,
-    send_channel_message,
-    timeout_member,
-    unban_member,
-)
 from backend.database.db import (
     Database,
     create_pool,
     create_appeal,
-    fetch_active_warns,
-    fetch_guild_plan,
-    fetch_guild_settings,
     fetch_latest_ban_record,
-    fetch_latest_sentiment,
-    fetch_message_count_sum,
-    fetch_moderation_logs,
-    insert_guild_warn,
     init_db,
     is_appeal_blocked,
-    clear_warns,
-    log_moderation_action,
-    record_ban_action,
 )
 
 
 async def build_bot(config: GatewayConfig) -> hikari.GatewayBot:
     """Create and wire the Hikari gateway bot."""
 
-    intents = hikari.Intents.GUILD_MESSAGES | hikari.Intents.MESSAGE_CONTENT
+    intents = (
+        hikari.Intents.GUILD_MESSAGES
+        | hikari.Intents.MESSAGE_CONTENT
+        | hikari.Intents.GUILD_VOICE_STATES
+    )
     bot = hikari.GatewayBot(token=config.discord_token, intents=intents)
 
     publisher = QueuePublisher(
@@ -52,133 +39,67 @@ async def build_bot(config: GatewayConfig) -> hikari.GatewayBot:
     if config.database_url:
         db = await create_pool(config.database_url)
         await init_db(db)
-        logging.info("Discord gateway connected to database for slash commands")
+        logging.info("Discord gateway connected to database for appeals")
 
-    def _option_value(interaction: hikari.CommandInteraction, name: str) -> Optional[Any]:
-        if not interaction.options:
-            return None
-        for option in interaction.options:
-            if option.name == name:
-                return option.value
-        return None
-
-    def _get_user_option(
-        interaction: hikari.CommandInteraction, name: str
-    ) -> tuple[Optional[str], Optional[hikari.User], Optional[hikari.Member]]:
-        value = _option_value(interaction, name)
-        if value is None:
-            return None, None, None
-        user_id = str(value)
-        resolved = interaction.resolved
-        user = resolved.users.get(value) if resolved and resolved.users else None
-        member = resolved.members.get(value) if resolved and resolved.members else None
-        return user_id, user, member
-
-    def _format_user(user_id: str, user: Optional[hikari.User]) -> str:
-        if user:
-            return f"{user.username}#{user.discriminator} (<@{user_id}>)"
-        return f"<@{user_id}>"
-
-    def _select_warn_action(policy: list[dict[str, Any]], warn_count: int) -> Optional[dict[str, Any]]:
-        if not policy:
-            return None
-        normalized: list[dict[str, Any]] = []
-        for item in policy:
-            if hasattr(item, "dict"):
-                data = item.dict()
-            else:
-                data = dict(item)
-            try:
-                threshold = int(data.get("threshold", 0))
-            except (TypeError, ValueError):
-                continue
-            action = str(data.get("action") or "").lower()
-            duration = data.get("duration_hours")
-            try:
-                duration_hours = int(duration) if duration is not None else None
-            except (TypeError, ValueError):
-                duration_hours = None
-            if threshold <= 0 or action not in {"timeout", "ban"}:
-                continue
-            normalized.append({"threshold": threshold, "action": action, "duration_hours": duration_hours})
-        normalized.sort(key=lambda item: item["threshold"])
-        selected = None
-        for item in normalized:
-            if warn_count >= item["threshold"]:
-                selected = item
-        return selected
-
-    async def _log_action(
-        *,
-        guild_id: str,
-        action: str,
-        target_id: Optional[str],
-        reason: Optional[str] = None,
-        actor_id: Optional[str] = None,
-        actor_type: Optional[str] = None,
-        source: Optional[str] = None,
-        channel_id: Optional[str] = None,
-        metadata: Optional[dict[str, Any]] = None,
-    ) -> None:
-        if not db:
-            return
-        await log_moderation_action(
-            db,
-            guild_id=guild_id,
-            action=action,
-            reason=reason,
-            channel_id=channel_id,
-            author_id=target_id,
-            actor_id=actor_id,
-            actor_type=actor_type,
-            target_id=target_id,
-            bot_id=config.discord_application_id,
-            source=source,
-            metadata=metadata,
-        )
-
-    async def _send_ban_dm(
-        *,
-        user_id: str,
-        guild_id: str,
-        reason: Optional[str],
-    ) -> None:
-        if not config.discord_token:
-            return
-        description = "You have been banned from this server."
-        if reason:
-            description += f"\nReason: {reason}"
-        description += "\nIf you believe this was a mistake, you can submit an appeal below."
-        embed = {
-            "title": "Ban Notice",
-            "description": description,
-            "color": 0xEF4444,
+    def _serialize_user(user: hikari.User) -> dict[str, Any]:
+        return {
+            "id": str(user.id),
+            "username": user.username,
+            "discriminator": user.discriminator,
+            "avatar": str(user.avatar_hash) if user.avatar_hash else None,
+            "global_name": getattr(user, "global_name", None),
         }
-        components = [
-            {
-                "type": 1,
-                "components": [
-                    {
-                        "type": 2,
-                        "style": 1,
-                        "label": "Appeal this ban",
-                        "custom_id": f"appeal:{guild_id}",
-                    }
-                ],
-            }
-        ]
-        try:
-            channel_id = await create_dm_channel(bot_token=config.discord_token, user_id=user_id)
-            await send_channel_message(
-                bot_token=config.discord_token,
-                channel_id=channel_id,
-                content="",
-                embeds=[embed],
-                components=components,
-                allowed_mentions={"parse": []},
-            )
-        except Exception as exc:  # noqa: BLE001
-            logging.warning("Failed to DM ban appeal to user %s: %s", user_id, exc)
+
+    def _serialize_options(options: Optional[list[hikari.CommandInteractionOption]]) -> list[dict[str, Any]]:
+        if not options:
+            return []
+        payload: list[dict[str, Any]] = []
+        for option in options:
+            data: dict[str, Any] = {"name": option.name, "type": int(option.type)}
+            value = option.value
+            if option.type in {
+                hikari.OptionType.USER,
+                hikari.OptionType.ROLE,
+                hikari.OptionType.CHANNEL,
+                hikari.OptionType.MENTIONABLE,
+            }:
+                data["value"] = str(value) if value is not None else None
+            elif isinstance(value, (str, int, float, bool)) or value is None:
+                data["value"] = value
+            else:
+                data["value"] = str(value)
+            if option.options:
+                data["options"] = _serialize_options(option.options)
+            payload.append(data)
+        return payload
+
+    def _build_command_payload(interaction: hikari.CommandInteraction) -> Dict[str, Any]:
+        resolved_users: dict[str, Any] = {}
+        if interaction.resolved and interaction.resolved.users:
+            for snowflake, user in interaction.resolved.users.items():
+                resolved_users[str(snowflake)] = _serialize_user(user)
+        author = _serialize_user(interaction.user)
+        member_permissions = int(interaction.member.permissions) if interaction.member else 0
+        timestamp = (interaction.created_at or datetime.now(timezone.utc)).isoformat()
+        return {
+            "event": "COMMAND_INTERACTION",
+            "message_id": str(interaction.id),
+            "guild_id": str(interaction.guild_id) if interaction.guild_id else "",
+            "channel_id": str(interaction.channel_id) if interaction.channel_id else "",
+            "author_id": str(interaction.user.id),
+            "content": interaction.command_name,
+            "timestamp": timestamp,
+            "metadata": {
+                "interaction_id": str(interaction.id),
+                "interaction_token": interaction.token,
+                "application_id": str(interaction.application_id) if interaction.application_id else None,
+                "command_name": interaction.command_name,
+                "options": _serialize_options(interaction.options),
+                "member_permissions": member_permissions,
+                "user": author,
+                "resolved_users": resolved_users,
+            },
+        }
 
     @bot.listen(hikari.StartingEvent)
     async def on_starting(_: hikari.StartingEvent) -> None:
@@ -210,7 +131,7 @@ async def build_bot(config: GatewayConfig) -> hikari.GatewayBot:
     async def on_message(event: hikari.GuildMessageCreateEvent) -> None:
         """Handle incoming guild messages and push to the queue."""
 
-        if event.is_bot or event.content is None:
+        if event.is_bot:
             return
 
         payload: Dict[str, Any] = {
@@ -223,7 +144,7 @@ async def build_bot(config: GatewayConfig) -> hikari.GatewayBot:
             "timestamp": (event.message.created_at or event.timestamp).isoformat(),
             "metadata": {
                 "is_webhook": event.is_webhook,
-                "mentions_self": event.message.mentions_self,
+                "mentions_self": bool(getattr(event.message, "mentions_self", False)),
             },
         }
 
@@ -232,6 +153,44 @@ async def build_bot(config: GatewayConfig) -> hikari.GatewayBot:
             logging.debug("Enqueued message %s to %s (%s)", event.message_id, config.queue_stream, entry_id)
         except Exception as exc:  # noqa: BLE001
             logging.exception("Failed to publish message %s: %s", event.message_id, exc)
+
+    @bot.listen(hikari.VoiceStateUpdateEvent)
+    async def on_voice_state(event: hikari.VoiceStateUpdateEvent) -> None:
+        state = event.state
+        old_state = event.old_state
+        guild_id = None
+        if state and state.guild_id:
+            guild_id = str(state.guild_id)
+        elif old_state and old_state.guild_id:
+            guild_id = str(old_state.guild_id)
+        if not guild_id:
+            return
+
+        before_channel = str(old_state.channel_id) if old_state and old_state.channel_id else None
+        after_channel = str(state.channel_id) if state and state.channel_id else None
+        channel_id = after_channel or before_channel or ""
+        user_id = str(state.user_id) if state else (str(old_state.user_id) if old_state else "")
+
+        payload: Dict[str, Any] = {
+            "event": "VOICE_STATE_UPDATE",
+            "message_id": str(uuid.uuid4()),
+            "guild_id": guild_id,
+            "channel_id": channel_id,
+            "author_id": user_id,
+            "content": "",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "user_id": user_id,
+            "metadata": {
+                "before": {"channel_id": before_channel},
+                "after": {"channel_id": after_channel},
+            },
+        }
+
+        try:
+            entry_id = await publisher.publish(payload)
+            logging.debug("Enqueued voice update %s to %s (%s)", user_id, config.queue_stream, entry_id)
+        except Exception as exc:  # noqa: BLE001
+            logging.exception("Failed to publish voice update for %s: %s", user_id, exc)
 
     @bot.listen(hikari.InteractionCreateEvent)
     async def on_interaction(event: hikari.InteractionCreateEvent) -> None:
@@ -250,391 +209,59 @@ async def build_bot(config: GatewayConfig) -> hikari.GatewayBot:
                 flags=hikari.MessageFlag.EPHEMERAL if ephemeral else None,
             )
 
-        if isinstance(interaction, hikari.CommandInteraction):
-            name = interaction.command_name
-            logging.info("Slash command %s guild=%s", name, getattr(interaction, "guild_id", None))
-
-            def has_any_permission(perms: list[hikari.Permissions]) -> bool:
-                member = interaction.member
-                if not member:
-                    return False
-                if member.permissions & hikari.Permissions.ADMINISTRATOR:
-                    return True
-                return any(member.permissions & perm for perm in perms)
-
-            if name == "ping":
-                await respond_embed(title="Pong", description="Bot is alive.", color=0x22C55E)
-                return
-
-            if name == "help":
-                await respond_embed(
-                    title="Commands",
-                    description="\n".join(
-                        [
-                            "/ping",
-                            "/help",
-                            "/dashboard",
-                            "/stats",
-                            "/sentiment",
-                            "/modlogs (Plus/Premium)",
-                            "/warn, /warns, /warn-clear",
-                            "/timeout, /ban, /unban",
-                        ]
-                    ),
-                )
-                return
-
-            if name == "dashboard":
-                base = (config.frontend_base_url or "http://localhost:3000").rstrip("/")
-                await respond_embed(
-                    title="Dashboard",
-                    description=f"{base}\nConnect this server in the dashboard to enable paid features.",
-                    color=0x38BDF8,
-                )
-                return
-
+        if not isinstance(interaction, hikari.CommandInteraction):
             guild_id = str(getattr(interaction, "guild_id", "") or "")
-            if guild_id == "":
-                await respond_embed(
-                    title="Server only",
-                    description="This command can only be used in a server.",
-                    color=0xF97316,
+            channel_id = str(getattr(interaction, "channel_id", "") or "")
+            author_id = str(interaction.user.id)
+            metadata: dict[str, Any] = {
+                "interaction_type": str(getattr(interaction, "type", "")),
+            }
+            if isinstance(interaction, hikari.ComponentInteraction):
+                metadata["custom_id"] = interaction.custom_id
+            if isinstance(interaction, hikari.ModalInteraction):
+                metadata["custom_id"] = interaction.custom_id
+            payload = {
+                "event": "INTERACTION_CREATE",
+                "message_id": str(interaction.id),
+                "guild_id": guild_id,
+                "channel_id": channel_id,
+                "author_id": author_id,
+                "content": "",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "metadata": metadata,
+            }
+            try:
+                await publisher.publish(payload)
+            except Exception as exc:  # noqa: BLE001
+                logging.exception("Failed to publish interaction %s: %s", interaction.id, exc)
+
+        if isinstance(interaction, hikari.CommandInteraction):
+            logging.info("Slash command %s guild=%s", interaction.command_name, interaction.guild_id)
+            try:
+                await interaction.create_initial_response(
+                    hikari.ResponseType.DEFERRED_MESSAGE_CREATE,
+                    flags=hikari.MessageFlag.EPHEMERAL,
                 )
+            except Exception as exc:  # noqa: BLE001
+                logging.exception("Failed to defer command interaction %s: %s", interaction.id, exc)
                 return
 
-            if not db:
-                await respond_embed(
-                    title="Database unavailable",
-                    description="Database not configured for this bot; set DATABASE_URL for DB-backed commands.",
-                    color=0xF97316,
-                )
-                return
-
-            if name == "stats":
-                now = datetime.now(timezone.utc)
-                last_hour = await fetch_message_count_sum(db, guild_id, now - timedelta(hours=1), now)
-                last_day = await fetch_message_count_sum(db, guild_id, now - timedelta(hours=24), now)
-                await respond_embed(
-                    title="Message stats",
-                    description=f"Last hour: {last_hour}\nLast 24h: {last_day}",
-                    color=0x22C55E,
-                )
-                return
-
-            if name == "sentiment":
-                latest = await fetch_latest_sentiment(db, guild_id)
-                if not latest:
-                    await respond_embed(title="Sentiment", description="No sentiment data yet.", color=0xF97316)
-                    return
-                score = latest.get("score")
-                score_str = f"{score:.3f}" if isinstance(score, (int, float)) else "n/a"
-                await respond_embed(
-                    title="Latest sentiment",
-                    description=f"{latest['day']}: {latest['sentiment']} (score {score_str})",
-                    color=0x38BDF8,
-                )
-                return
-
-            if name == "modlogs":
-                plan = await fetch_guild_plan(db, guild_id)
-                if plan not in {"plus", "premium"}:
-                    await respond_embed(
-                        title="Moderation logs",
-                        description="Moderation log history is a paid feature.",
-                        color=0xF97316,
-                    )
-                    return
-
-                rows = await fetch_moderation_logs(db, guild_id, limit=5)
-                if not rows:
-                    await respond_embed(title="Moderation logs", description="No moderation events yet.")
-                    return
-
-                lines = []
-                for row in rows:
-                    when = row["created_at"]
-                    action = row.get("action") or "event"
-                    reason = row.get("reason") or ""
-                    lines.append(f"- {when}: {action} {reason}".strip())
-                await respond_embed(
-                    title="Latest moderation events",
-                    description="\n".join(lines),
-                    color=0x38BDF8,
-                )
-                return
-
-            if name in {"warn", "warns", "warn-clear"}:
-                if not has_any_permission([hikari.Permissions.MODERATE_MEMBERS, hikari.Permissions.MANAGE_MESSAGES]):
-                    await respond_embed(
-                        title="Missing permissions",
-                        description="You need Moderate Members or Manage Messages to use warnings.",
-                        color=0xEF4444,
-                    )
-                    return
-
-                user_id, user, _member = _get_user_option(interaction, "user")
-                if not user_id:
-                    await respond_embed(title="Missing user", description="Select a user to continue.", color=0xEF4444)
-                    return
-
-                now = datetime.now(timezone.utc)
-
-                if name == "warns":
-                    warns = await fetch_active_warns(db, guild_id, user_id, now)
-                    if not warns:
-                        await respond_embed(
-                            title="Warnings",
-                            description=f"{_format_user(user_id, user)} has no active warnings.",
-                            color=0x22C55E,
-                        )
-                        return
-                    lines = []
-                    for warn in warns[:5]:
-                        reason = warn.get("reason") or "No reason provided"
-                        lines.append(f"- {warn['created_at']}: {reason}")
-                    await respond_embed(
-                        title="Warnings",
-                        description=f"{_format_user(user_id, user)} has {len(warns)} warning(s).\n" + "\n".join(lines),
-                        color=0xF59E0B,
-                    )
-                    return
-
-                if name == "warn-clear":
-                    cleared = await clear_warns(db, guild_id, user_id)
-                    await _log_action(
-                        guild_id=guild_id,
-                        action="warn_clear",
-                        target_id=user_id,
-                        actor_id=str(interaction.user.id),
-                        actor_type="human",
-                        source="command",
-                        channel_id=str(interaction.channel_id) if interaction.channel_id else None,
-                        metadata={"cleared": cleared},
-                    )
-                    await respond_embed(
-                        title="Warnings cleared",
-                        description=f"Cleared {cleared} warning(s) for {_format_user(user_id, user)}.",
-                        color=0x22C55E,
-                    )
-                    return
-
-                reason = _option_value(interaction, "reason")
-                settings = await fetch_guild_settings(db, guild_id)
-                expires_at = None
-                if settings.warn_decay_days and settings.warn_decay_days > 0:
-                    expires_at = now + timedelta(days=settings.warn_decay_days)
-                await insert_guild_warn(
-                    db,
-                    guild_id=guild_id,
-                    user_id=user_id,
-                    moderator_id=str(interaction.user.id),
-                    reason=reason,
-                    expires_at=expires_at,
-                )
-                warns = await fetch_active_warns(db, guild_id, user_id, now)
-                warn_count = len(warns)
-                action = _select_warn_action(settings.warn_policy, warn_count)
-                action_note = None
-                if action:
-                    if action["action"] == "timeout":
-                        duration_hours = action["duration_hours"] or 24
-                        until = now + timedelta(hours=duration_hours)
-                        await timeout_member(
-                            bot_token=config.discord_token,
-                            guild_id=guild_id,
-                            user_id=user_id,
-                            communication_disabled_until=until.isoformat(),
-                            reason=f"Warn threshold reached ({warn_count})",
-                        )
-                        await _log_action(
-                            guild_id=guild_id,
-                            action="timeout",
-                            target_id=user_id,
-                            actor_id=config.discord_application_id,
-                            actor_type="bot" if config.discord_application_id else "system",
-                            source="automod",
-                            channel_id=str(interaction.channel_id) if interaction.channel_id else None,
-                            reason="Warn threshold reached",
-                            metadata={"warn_count": warn_count, "duration_hours": duration_hours},
-                        )
-                        action_note = f"Auto-timeout applied ({duration_hours}h)."
-                    elif action["action"] == "ban":
-                        await ban_member(
-                            bot_token=config.discord_token,
-                            guild_id=guild_id,
-                            user_id=user_id,
-                            reason=f"Warn threshold reached ({warn_count})",
-                        )
-                        await record_ban_action(
-                            db,
-                            guild_id=guild_id,
-                            user_id=user_id,
-                            moderator_id=str(interaction.user.id),
-                            moderator_name=interaction.user.username,
-                            reason="Warn threshold reached",
-                        )
-                        await _send_ban_dm(user_id=user_id, guild_id=guild_id, reason="Warn threshold reached")
-                        await _log_action(
-                            guild_id=guild_id,
-                            action="ban",
-                            target_id=user_id,
-                            actor_id=config.discord_application_id,
-                            actor_type="bot" if config.discord_application_id else "system",
-                            source="automod",
-                            channel_id=str(interaction.channel_id) if interaction.channel_id else None,
-                            reason="Warn threshold reached",
-                            metadata={"warn_count": warn_count},
-                        )
-                        action_note = "Auto-ban applied."
-
-                await _log_action(
-                    guild_id=guild_id,
-                    action="warn",
-                    target_id=user_id,
-                    actor_id=str(interaction.user.id),
-                    actor_type="human",
-                    source="command",
-                    channel_id=str(interaction.channel_id) if interaction.channel_id else None,
-                    reason=reason,
-                    metadata={"warn_count": warn_count},
-                )
-
-                description = f"{_format_user(user_id, user)} now has {warn_count} warning(s)."
-                if reason:
-                    description += f"\nReason: {reason}"
-                if action_note:
-                    description += f"\n{action_note}"
-                await respond_embed(title="Warning issued", description=description, color=0xF59E0B)
-                return
-
-            if name == "timeout":
-                if not has_any_permission([hikari.Permissions.MODERATE_MEMBERS]):
-                    await respond_embed(
-                        title="Missing permissions",
-                        description="You need Moderate Members to timeout users.",
-                        color=0xEF4444,
-                    )
-                    return
-
-                user_id, user, _member = _get_user_option(interaction, "user")
-                minutes = _option_value(interaction, "minutes")
-                reason = _option_value(interaction, "reason")
-                if not user_id or minutes is None:
-                    await respond_embed(title="Missing input", description="User and minutes are required.")
-                    return
+            payload = _build_command_payload(interaction)
+            try:
+                entry_id = await publisher.publish(payload)
+                logging.debug("Enqueued command %s to %s (%s)", interaction.id, config.queue_stream, entry_id)
+            except Exception as exc:  # noqa: BLE001
+                logging.exception("Failed to publish command %s: %s", interaction.id, exc)
                 try:
-                    minutes_value = int(minutes)
-                except (TypeError, ValueError):
-                    await respond_embed(title="Invalid duration", description="Minutes must be a number.")
-                    return
-                if minutes_value < 1 or minutes_value > 40320:
-                    await respond_embed(title="Invalid duration", description="Timeout must be 1-40320 minutes.")
-                    return
-                until = datetime.now(timezone.utc) + timedelta(minutes=minutes_value)
-                await timeout_member(
-                    bot_token=config.discord_token,
-                    guild_id=guild_id,
-                    user_id=user_id,
-                    communication_disabled_until=until.isoformat(),
-                    reason=reason,
-                )
-                await _log_action(
-                    guild_id=guild_id,
-                    action="timeout",
-                    target_id=user_id,
-                    actor_id=str(interaction.user.id),
-                    actor_type="human",
-                    source="command",
-                    channel_id=str(interaction.channel_id) if interaction.channel_id else None,
-                    reason=reason,
-                    metadata={"duration_minutes": minutes_value},
-                )
-                description = f"Timed out {_format_user(user_id, user)} for {minutes_value} minutes."
-                if reason:
-                    description += f"\nReason: {reason}"
-                await respond_embed(title="Timeout applied", description=description, color=0xF97316)
-                return
-
-            if name == "ban":
-                if not has_any_permission([hikari.Permissions.BAN_MEMBERS]):
-                    await respond_embed(
-                        title="Missing permissions",
-                        description="You need Ban Members to ban users.",
-                        color=0xEF4444,
+                    await interaction.edit_initial_response(
+                        embed=hikari.Embed(
+                            title="Command failed",
+                            description="Unable to reach the commands worker. Try again shortly.",
+                            color=0xEF4444,
+                        )
                     )
-                    return
-
-                user_id, user, _member = _get_user_option(interaction, "user")
-                reason = _option_value(interaction, "reason")
-                if not user_id:
-                    await respond_embed(title="Missing user", description="Select a user to ban.", color=0xEF4444)
-                    return
-                await ban_member(
-                    bot_token=config.discord_token,
-                    guild_id=guild_id,
-                    user_id=user_id,
-                    reason=reason,
-                )
-                await _log_action(
-                    guild_id=guild_id,
-                    action="ban",
-                    target_id=user_id,
-                    actor_id=str(interaction.user.id),
-                    actor_type="human",
-                    source="command",
-                    channel_id=str(interaction.channel_id) if interaction.channel_id else None,
-                    reason=reason,
-                )
-                await record_ban_action(
-                    db,
-                    guild_id=guild_id,
-                    user_id=user_id,
-                    moderator_id=str(interaction.user.id),
-                    moderator_name=interaction.user.username,
-                    reason=reason,
-                )
-                await _send_ban_dm(user_id=user_id, guild_id=guild_id, reason=reason)
-                description = f"Banned {_format_user(user_id, user)}."
-                if reason:
-                    description += f"\nReason: {reason}"
-                await respond_embed(title="User banned", description=description, color=0xEF4444)
-                return
-
-            if name == "unban":
-                if not has_any_permission([hikari.Permissions.BAN_MEMBERS]):
-                    await respond_embed(
-                        title="Missing permissions",
-                        description="You need Ban Members to unban users.",
-                        color=0xEF4444,
-                    )
-                    return
-
-                raw_user_id = _option_value(interaction, "user_id")
-                if not raw_user_id:
-                    await respond_embed(title="Missing user id", description="Provide a user ID to unban.")
-                    return
-                user_id = "".join(ch for ch in str(raw_user_id) if ch.isdigit())
-                if not user_id:
-                    await respond_embed(title="Invalid user id", description="Provide a valid user ID.")
-                    return
-                await unban_member(
-                    bot_token=config.discord_token,
-                    guild_id=guild_id,
-                    user_id=user_id,
-                )
-                await _log_action(
-                    guild_id=guild_id,
-                    action="unban",
-                    target_id=user_id,
-                    actor_id=str(interaction.user.id),
-                    actor_type="human",
-                    source="command",
-                    channel_id=str(interaction.channel_id) if interaction.channel_id else None,
-                )
-                await respond_embed(title="User unbanned", description=f"Unbanned <@{user_id}>.", color=0x22C55E)
-                return
-
-            await respond_embed(title="Unknown command", description="Try /help for a list of commands.")
+                except Exception as edit_exc:  # noqa: BLE001
+                    logging.exception("Failed to edit command response: %s", edit_exc)
             return
 
         if isinstance(interaction, hikari.ComponentInteraction):

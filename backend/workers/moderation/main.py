@@ -58,6 +58,8 @@ def _decide_action(message: QueueMessage) -> tuple[str, str]:
 
 
 async def handle_message(message: QueueMessage, config: AppConfig, db: Optional[Database]) -> None:
+    if message.event != "MESSAGE_CREATE":
+        return
     if not db:
         return
 

@@ -17,9 +17,10 @@ import { formatDate } from "@/lib/utils";
 
 interface MessageVolumeChartProps {
   data: MessageCountPoint[];
+  className?: string;
 }
 
-export function MessageVolumeChart({ data }: MessageVolumeChartProps) {
+export function MessageVolumeChart({ data, className }: MessageVolumeChartProps) {
   // Format data for chart
   const chartData = data.map((d) => ({
     date: new Date(d.time_bucket).toLocaleDateString(),
@@ -27,7 +28,7 @@ export function MessageVolumeChart({ data }: MessageVolumeChartProps) {
   }));
 
   return (
-    <Card className="col-span-4">
+    <Card className={className}>
       <CardHeader>
         <CardTitle>Message Volume</CardTitle>
       </CardHeader>
@@ -63,16 +64,17 @@ export function MessageVolumeChart({ data }: MessageVolumeChartProps) {
 
 interface SentimentChartProps {
   data: SentimentPoint[];
+  className?: string;
 }
 
-export function SentimentChart({ data }: SentimentChartProps) {
+export function SentimentChart({ data, className }: SentimentChartProps) {
     const chartData = data.map(d => ({
         date: formatDate(d.day),
         score: d.score !== null ? d.score : 0
     }));
 
   return (
-    <Card className="col-span-4">
+    <Card className={className}>
       <CardHeader>
         <CardTitle>Sentiment Trends</CardTitle>
       </CardHeader>

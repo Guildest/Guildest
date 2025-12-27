@@ -45,6 +45,78 @@ export type MessageCountsResponse = { guild_id: string; from: string; to: string
 export type SentimentPoint = { day: string; sentiment: string; score: number | null };
 export type SentimentDailyResponse = { guild_id: string; from: string; to: string; points: SentimentPoint[] };
 
+export type AnalyticsSummaryPoint = {
+  day: string;
+  messages: number;
+  voice_minutes: number;
+  active_channels: number;
+  dau_est: number | null;
+  wau_est: number | null;
+  mau_est: number | null;
+};
+
+export type AnalyticsSummaryResponse = {
+  guild_id: string;
+  from: string;
+  to: string;
+  points: AnalyticsSummaryPoint[];
+};
+
+export type AnalyticsVoicePoint = {
+  bucket_start: string;
+  total_seconds: number;
+  peak_concurrent: number;
+};
+
+export type AnalyticsVoiceResponse = {
+  guild_id: string;
+  from: string;
+  to: string;
+  bucket_size: number;
+  points: AnalyticsVoicePoint[];
+};
+
+export type AnalyticsCommandPoint = {
+  bucket_start: string;
+  count: number;
+};
+
+export type AnalyticsCommandResponse = {
+  guild_id: string;
+  from: string;
+  to: string;
+  bucket_size: number;
+  points: AnalyticsCommandPoint[];
+};
+
+export type AnalyticsTopChannel = { channel_id: string; count: number };
+export type AnalyticsTopChannelsResponse = {
+  guild_id: string;
+  from: string;
+  to: string;
+  limit: number;
+  points: AnalyticsTopChannel[];
+};
+
+export type AnalyticsTopCommand = { command_name: string; count: number };
+export type AnalyticsTopCommandsResponse = {
+  guild_id: string;
+  from: string;
+  to: string;
+  limit: number;
+  points: AnalyticsTopCommand[];
+};
+
+export type AnalyticsMessageBucketPoint = { bucket_start: string; count: number };
+export type AnalyticsMessageBucketResponse = {
+  guild_id: string;
+  from: string;
+  to: string;
+  bucket_size: number;
+  channel_id?: string | null;
+  points: AnalyticsMessageBucketPoint[];
+};
+
 export type ModerationLogItem = {
   id: number;
   message_id: string | null;

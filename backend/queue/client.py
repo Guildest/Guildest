@@ -89,6 +89,8 @@ class QueueConsumer:
             for _, messages in entries:
                 for message_id, fields in messages:
                     payload_raw = fields.get("data")
+                    if payload_raw is None:
+                        payload_raw = fields.get(b"data")
                     try:
                         payload_dict = _decode_payload(payload_raw)
                         message = QueueMessage.model_validate(payload_dict)

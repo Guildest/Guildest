@@ -137,3 +137,66 @@ async def send_channel_message(
     async with httpx.AsyncClient(timeout=timeout_seconds) as client:
         response = await client.post(f"{DISCORD_API_BASE}/channels/{channel_id}/messages", headers=headers, json=payload)
         response.raise_for_status()
+
+
+async def edit_interaction_response(
+    *,
+    application_id: str,
+    interaction_token: str,
+    content: Optional[str] = None,
+    allowed_mentions: Optional[dict[str, Any]] = None,
+    embeds: Optional[list[dict[str, Any]]] = None,
+    components: Optional[list[dict[str, Any]]] = None,
+    timeout_seconds: float = 15,
+) -> None:
+    headers = {"Content-Type": "application/json"}
+    payload: dict[str, Any] = {}
+    if content is not None:
+        payload["content"] = content
+    if allowed_mentions is not None:
+        payload["allowed_mentions"] = allowed_mentions
+    if embeds is not None:
+        payload["embeds"] = embeds
+    if components is not None:
+        payload["components"] = components
+
+    async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+        response = await client.patch(
+            f"{DISCORD_API_BASE}/webhooks/{application_id}/{interaction_token}/messages/@original",
+            headers=headers,
+            json=payload,
+        )
+        response.raise_for_status()
+
+
+async def send_interaction_followup(
+    *,
+    application_id: str,
+    interaction_token: str,
+    content: Optional[str] = None,
+    allowed_mentions: Optional[dict[str, Any]] = None,
+    embeds: Optional[list[dict[str, Any]]] = None,
+    components: Optional[list[dict[str, Any]]] = None,
+    ephemeral: bool = False,
+    timeout_seconds: float = 15,
+) -> None:
+    headers = {"Content-Type": "application/json"}
+    payload: dict[str, Any] = {}
+    if content is not None:
+        payload["content"] = content
+    if allowed_mentions is not None:
+        payload["allowed_mentions"] = allowed_mentions
+    if embeds is not None:
+        payload["embeds"] = embeds
+    if components is not None:
+        payload["components"] = components
+    if ephemeral:
+        payload["flags"] = 1 << 6
+
+    async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+        response = await client.post(
+            f"{DISCORD_API_BASE}/webhooks/{application_id}/{interaction_token}",
+            headers=headers,
+            json=payload,
+        )
+        response.raise_for_status()

@@ -190,6 +190,8 @@ async def _maybe_generate_report(
 
 
 async def handle_message(message: QueueMessage, config: AppConfig, db: Optional[Database]) -> None:
+    if message.event != "MESSAGE_CREATE":
+        return
     if not db:
         logging.info("[sentiment] observed message %s in guild %s", message.message_id, message.guild_id)
         return
