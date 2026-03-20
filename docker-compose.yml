@@ -1,0 +1,81 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: guildest-postgres
+    environment:
+      POSTGRES_DB: guildest
+      POSTGRES_USER: guildest
+      POSTGRES_PASSWORD: guildest
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U guildest -d guildest"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: valkey/valkey:8-alpine
+    container_name: guildest-redis
+    command: ["valkey-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  gateway:
+    build:
+      context: .
+      target: gateway-runtime
+    container_name: guildest-gateway
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgres://guildest:guildest@postgres:5432/guildest
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      target: api-runtime
+    container_name: guildest-api
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgres://guildest:guildest@postgres:5432/guildest
+      API_BIND_ADDR: 0.0.0.0:8080
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      target: worker-runtime
+    container_name: guildest-worker
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgres://guildest:guildest@postgres:5432/guildest
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
