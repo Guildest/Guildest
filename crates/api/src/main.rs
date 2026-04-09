@@ -1,8 +1,9 @@
 use std::{
     collections::HashMap,
+    convert::Infallible,
     net::SocketAddr,
     sync::{Arc, OnceLock},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
@@ -10,20 +11,28 @@ use axum::{
     Json, Router,
     extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode, header},
-    response::{IntoResponse, Redirect, Response},
+    response::{
+        IntoResponse, Redirect, Response,
+        sse::{Event, KeepAlive, Sse},
+    },
     routing::{get, post},
 };
 use chrono::{Days, Utc};
 use common::{
     config::Settings,
     jobs::{BACKFILL_STREAM, BackfillJob},
-    queue::{EventQueue, RedisEventQueue},
+    queue::{
+        EventQueue, PUBLIC_STATS_MEMBERS_KEY, PUBLIC_STATS_MESSAGES_KEY, PUBLIC_STATS_SERVERS_KEY,
+        PUBLIC_STATS_UPDATES_CHANNEL, RedisEventQueue,
+    },
     store::{PostgresRawEventStore, RawEventStore},
 };
+use futures_util::{Stream, StreamExt, stream};
 use prometheus::{Encoder, HistogramOpts, HistogramVec, IntCounterVec, Registry, TextEncoder};
 use reqwest::Client;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sqlx::{FromRow, PgPool, postgres::PgPoolOptions};
+use tokio::sync::watch;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
@@ -45,6 +54,7 @@ struct AppState {
     http_client: Client,
     metrics: &'static ApiMetrics,
     pool: PgPool,
+    public_stats_cache: watch::Sender<PublicStatsResponse>,
     queue: RedisEventQueue,
     settings: Settings,
 }
@@ -351,7 +361,7 @@ struct PublicLinksResponse {
     login_url: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct PublicStatsResponse {
     members: i64,
     messages_tracked: i64,
@@ -433,6 +443,11 @@ struct PublicStatsRow {
     members: i64,
     messages_tracked: i64,
     servers: i64,
+}
+
+struct PublicStatsEventStream {
+    initial_event: Option<Event>,
+    updates: watch::Receiver<PublicStatsResponse>,
 }
 
 #[derive(Debug, FromRow)]
@@ -585,19 +600,27 @@ async fn main() -> Result<()> {
         .ensure_schema()
         .await?;
     ensure_public_schema(&pool).await?;
+    let queue = RedisEventQueue::new(&settings.redis_url)?;
+    let initial_public_stats = load_public_stats_snapshot(&pool, &queue)
+        .await
+        .context("failed to initialize public stats cache")?;
+    let (public_stats_cache, _) = watch::channel(initial_public_stats);
 
     let state = Arc::new(AppState {
         http_client: Client::new(),
         metrics: api_metrics(),
         pool,
-        queue: RedisEventQueue::new(&settings.redis_url)?,
+        public_stats_cache,
+        queue,
         settings: settings.clone(),
     });
+    tokio::spawn(run_public_stats_cache_updater(state.clone()));
     let cors = build_cors(&settings.public_api_allowed_origin);
     let app = Router::new()
         .route("/health", get(health))
         .route("/metrics", get(metrics))
         .route("/v1/public/stats", get(public_stats))
+        .route("/v1/public/stats/stream", get(public_stats_stream))
         .route("/v1/public/links", get(public_links))
         .route("/v1/public/oauth/start/login", get(start_login_oauth))
         .route("/v1/public/oauth/start/invite", get(start_invite_oauth))
@@ -758,25 +781,9 @@ async fn start_install(State(state): State<Arc<AppState>>) -> impl IntoResponse 
     }
 }
 
-async fn public_stats(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<PublicStatsResponse>, StatusCode> {
+async fn public_stats(State(state): State<Arc<AppState>>) -> Result<Response, StatusCode> {
     let request_started = Instant::now();
-    let query_started = Instant::now();
-    let row_result = fetch_public_stats_row(&state.pool).await;
-    observe_sql_query(
-        state.metrics,
-        "public_stats",
-        status_label(row_result.as_ref().map(|_| &())),
-        query_started.elapsed().as_secs_f64(),
-    );
-
-    let row = row_result.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let response = PublicStatsResponse {
-        members: row.members,
-        messages_tracked: row.messages_tracked,
-        servers: row.servers,
-    };
+    let response = current_public_stats(state.as_ref());
     observe_api_request(
         state.metrics,
         "public_stats",
@@ -785,7 +792,182 @@ async fn public_stats(
         estimate_json_size(&response),
     );
 
-    Ok(Json(response))
+    Ok((
+        [(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-store, max-age=0"),
+        )],
+        Json(response),
+    )
+        .into_response())
+}
+
+async fn public_stats_stream(
+    State(state): State<Arc<AppState>>,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, StatusCode> {
+    let initial_event = build_public_stats_event(&current_public_stats(state.as_ref()))?;
+    let stream = stream::unfold(
+        PublicStatsEventStream {
+            initial_event: Some(initial_event),
+            updates: state.public_stats_cache.subscribe(),
+        },
+        |mut stream_state| async move {
+            if let Some(event) = stream_state.initial_event.take() {
+                return Some((Ok(event), stream_state));
+            }
+
+            if stream_state.updates.changed().await.is_err() {
+                return None;
+            }
+
+            let response = stream_state.updates.borrow().clone();
+            match build_public_stats_event(&response) {
+                Ok(event) => Some((Ok(event), stream_state)),
+                Err(status) => {
+                    warn!(?status, "failed to build public stats sse event");
+                    None
+                }
+            }
+        },
+    );
+
+    Ok(Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("keep-alive"),
+    ))
+}
+
+fn build_public_stats_event(response: &PublicStatsResponse) -> Result<Event, StatusCode> {
+    let payload = serde_json::to_string(response).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Event::default().event("public_stats").data(payload))
+}
+
+fn current_public_stats(state: &AppState) -> PublicStatsResponse {
+    state.public_stats_cache.borrow().clone()
+}
+
+async fn load_public_stats_snapshot(
+    pool: &PgPool,
+    queue: &RedisEventQueue,
+) -> Result<PublicStatsResponse> {
+    if let Some(response) = load_public_stats_from_hot_cache(queue).await {
+        return Ok(response);
+    }
+
+    let row = fetch_public_stats_row(pool)
+        .await
+        .context("failed to fetch public stats row")?;
+    Ok(PublicStatsResponse {
+        members: row.members,
+        messages_tracked: row.messages_tracked,
+        servers: row.servers,
+    })
+}
+
+async fn refresh_public_stats_snapshot(state: &AppState) -> Result<()> {
+    let query_started = Instant::now();
+    let snapshot = load_public_stats_snapshot(&state.pool, &state.queue).await;
+    if snapshot.is_err() {
+        observe_sql_query(
+            state.metrics,
+            "public_stats",
+            "error",
+            query_started.elapsed().as_secs_f64(),
+        );
+    }
+    let snapshot = snapshot?;
+    observe_sql_query(
+        state.metrics,
+        "public_stats",
+        "ok",
+        query_started.elapsed().as_secs_f64(),
+    );
+
+    if *state.public_stats_cache.borrow() != snapshot {
+        state.public_stats_cache.send_replace(snapshot);
+    }
+
+    Ok(())
+}
+
+async fn run_public_stats_cache_updater(state: Arc<AppState>) {
+    loop {
+        let mut pubsub = match state.queue.pubsub().await {
+            Ok(pubsub) => pubsub,
+            Err(error) => {
+                warn!(?error, "failed to open public stats pubsub connection");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+        };
+
+        if let Err(error) = pubsub.subscribe(PUBLIC_STATS_UPDATES_CHANNEL).await {
+            warn!(?error, "failed to subscribe to public stats updates");
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            continue;
+        }
+
+        if let Err(error) = refresh_public_stats_snapshot(state.as_ref()).await {
+            warn!(?error, "failed to refresh public stats snapshot");
+        }
+
+        let mut refresh_interval = tokio::time::interval(Duration::from_secs(30));
+        refresh_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut messages = pubsub.on_message();
+
+        loop {
+            tokio::select! {
+                _ = refresh_interval.tick() => {
+                    if let Err(error) = refresh_public_stats_snapshot(state.as_ref()).await {
+                        warn!(?error, "failed to refresh public stats snapshot");
+                    }
+                }
+                next_message = messages.next() => {
+                    match next_message {
+                        Some(_) => {
+                            if let Err(error) = refresh_public_stats_snapshot(state.as_ref()).await {
+                                warn!(?error, "failed to refresh public stats snapshot");
+                            }
+                        }
+                        None => {
+                            warn!("public stats pubsub connection closed");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+async fn load_public_stats_from_hot_cache(queue: &RedisEventQueue) -> Option<PublicStatsResponse> {
+    let values = match queue
+        .mget_strings(&[
+            PUBLIC_STATS_MESSAGES_KEY,
+            PUBLIC_STATS_SERVERS_KEY,
+            PUBLIC_STATS_MEMBERS_KEY,
+        ])
+        .await
+    {
+        Ok(values) => values,
+        Err(error) => {
+            warn!(?error, "failed to read public stats hot cache");
+            return None;
+        }
+    };
+
+    let [messages, servers, members] = values.as_slice() else {
+        return None;
+    };
+
+    Some(PublicStatsResponse {
+        messages_tracked: messages.as_deref()?.parse().ok()?,
+        servers: servers.as_deref()?.parse().ok()?,
+        members: members.as_deref()?.parse().ok()?,
+    })
 }
 
 async fn oauth_callback(
@@ -4455,16 +4637,41 @@ fn discord_api_url(base: &str, path: &str) -> Result<String> {
 fn payload_preview(payload: &str) -> String {
     const MAX_PREVIEW_CHARS: usize = 140;
 
-    let normalized = payload.split_whitespace().collect::<Vec<_>>().join(" ");
-    if normalized.chars().count() <= MAX_PREVIEW_CHARS {
-        normalized
-    } else {
-        let preview = normalized
-            .chars()
-            .take(MAX_PREVIEW_CHARS)
-            .collect::<String>();
-        format!("{preview}...")
+    let mut preview = String::new();
+    let mut char_count = 0usize;
+    let mut saw_whitespace = false;
+    let mut truncated = false;
+
+    for ch in payload.chars() {
+        if ch.is_whitespace() {
+            saw_whitespace = true;
+            continue;
+        }
+
+        if saw_whitespace && !preview.is_empty() {
+            if char_count == MAX_PREVIEW_CHARS {
+                truncated = true;
+                break;
+            }
+            preview.push(' ');
+            char_count += 1;
+        }
+        saw_whitespace = false;
+
+        if char_count == MAX_PREVIEW_CHARS {
+            truncated = true;
+            break;
+        }
+
+        preview.push(ch);
+        char_count += 1;
     }
+
+    if truncated {
+        preview.push_str("...");
+    }
+
+    preview
 }
 
 fn normalize_operator_reason(reason: Option<&str>) -> Option<String> {

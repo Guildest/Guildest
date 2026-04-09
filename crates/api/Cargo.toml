@@ -9,7 +9,9 @@ anyhow.workspace = true
 axum.workspace = true
 chrono.workspace = true
 common = { path = "../common" }
+futures-util.workspace = true
 prometheus.workspace = true
+redis.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

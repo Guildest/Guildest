@@ -16,7 +16,8 @@ use common::{
     config::Settings,
     events::{EventEnvelope, EventPayload},
     jobs::{BACKFILL_STREAM, BackfillJob},
-    queue::{EventQueue, QueueDelivery, RedisEventQueue},
+    queue::{EventQueue, QueueDelivery, QueuedEventRef, RedisEventQueue},
+    store::{PostgresRawEventStore, RawEventStore},
 };
 use prometheus::{
     Encoder, Histogram, HistogramOpts, HistogramVec, IntCounterVec, IntGaugeVec, Registry,
@@ -25,18 +26,127 @@ use prometheus::{
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, PgPool, postgres::PgPoolOptions};
+use tokio::sync::{Mutex, Notify};
 use tokio::{signal, task};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Clone)]
 struct WorkerContext {
+    backfill_channel_concurrency: usize,
     backfill_page_delay: Duration,
     discord_api_base_url: String,
     discord_http: Client,
+    discord_limiter: Arc<DiscordRequestLimiter>,
     discord_token: String,
     pool: PgPool,
     queue: RedisEventQueue,
+    store: PostgresRawEventStore,
+}
+
+struct DiscordRequestLimiter {
+    notify: Notify,
+    state: Mutex<DiscordRequestLimiterState>,
+}
+
+struct DiscordRequestLimiterState {
+    active_requests: usize,
+    backoff_until: Option<Instant>,
+    current_limit: usize,
+    max_limit: usize,
+    min_limit: usize,
+    success_streak: usize,
+}
+
+struct DiscordRequestPermit {
+    limiter: Arc<DiscordRequestLimiter>,
+}
+
+impl DiscordRequestLimiter {
+    fn new(max_limit: usize) -> Self {
+        Self {
+            notify: Notify::new(),
+            state: Mutex::new(DiscordRequestLimiterState {
+                active_requests: 0,
+                backoff_until: None,
+                current_limit: max_limit.max(1),
+                max_limit: max_limit.max(1),
+                min_limit: 1,
+                success_streak: 0,
+            }),
+        }
+    }
+
+    async fn acquire(self: &Arc<Self>) -> DiscordRequestPermit {
+        loop {
+            let wait_duration = {
+                let mut state = self.state.lock().await;
+                if let Some(backoff_until) = state.backoff_until {
+                    let now = Instant::now();
+                    if backoff_until > now {
+                        Some(backoff_until.saturating_duration_since(now))
+                    } else {
+                        state.backoff_until = None;
+                        None
+                    }
+                } else if state.active_requests < state.current_limit {
+                    state.active_requests += 1;
+                    return DiscordRequestPermit {
+                        limiter: Arc::clone(self),
+                    };
+                } else {
+                    None
+                }
+            };
+
+            if let Some(duration) = wait_duration {
+                tokio::time::sleep(duration).await;
+            } else {
+                self.notify.notified().await;
+            }
+        }
+    }
+
+    async fn on_success(&self) {
+        let mut state = self.state.lock().await;
+        state.success_streak += 1;
+        if state.current_limit < state.max_limit && state.success_streak >= state.current_limit * 8
+        {
+            state.current_limit += 1;
+            state.success_streak = 0;
+            self.notify.notify_waiters();
+        }
+    }
+
+    async fn on_rate_limit(&self, retry_after: Duration) {
+        let mut state = self.state.lock().await;
+        state.success_streak = 0;
+        state.current_limit = (state.current_limit / 2).max(state.min_limit);
+        let next_backoff = Instant::now() + retry_after;
+        state.backoff_until = Some(match state.backoff_until {
+            Some(current) if current > next_backoff => current,
+            _ => next_backoff,
+        });
+        self.notify.notify_waiters();
+    }
+
+    async fn release(&self) {
+        let mut state = self.state.lock().await;
+        if state.active_requests > 0 {
+            state.active_requests -= 1;
+        }
+        drop(state);
+        self.notify.notify_waiters();
+    }
+}
+
+impl Drop for DiscordRequestPermit {
+    fn drop(&mut self) {
+        let limiter = Arc::clone(&self.limiter);
+        tokio::spawn(async move {
+            limiter.release().await;
+        });
+    }
 }
 
 struct WorkerMetrics {
@@ -72,6 +182,54 @@ struct IndexedMessage {
 }
 
 #[derive(Debug, FromRow)]
+struct InsertedIndexedMessageRow {
+    attachment_count: i32,
+    author_id: String,
+    channel_id: String,
+    content_length: i32,
+    guild_id: String,
+    is_bot: bool,
+    is_reply: bool,
+    message_id: String,
+    occurred_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+struct BackfillRebuildScope {
+    activity_end_at: DateTime<Utc>,
+    activity_start_at: DateTime<Utc>,
+    activity_start_date: NaiveDate,
+    activity_end_date: NaiveDate,
+    cohort_start_date: NaiveDate,
+    cohort_end_date: NaiveDate,
+    guild_id: String,
+}
+
+impl BackfillRebuildScope {
+    fn new(
+        guild_id: String,
+        activity_start_at: DateTime<Utc>,
+        activity_end_at: DateTime<Utc>,
+    ) -> Self {
+        let activity_start_date = date_for(activity_start_at);
+        let activity_end_date = date_for(activity_end_at);
+        let cohort_start_date = activity_start_date
+            .checked_sub_days(Days::new(36))
+            .unwrap_or(activity_start_date);
+
+        Self {
+            activity_end_at,
+            activity_start_at,
+            activity_start_date,
+            activity_end_date,
+            cohort_start_date,
+            cohort_end_date: activity_end_date,
+            guild_id,
+        }
+    }
+}
+
+#[derive(Debug, FromRow)]
 struct ActiveVoiceSessionRow {
     channel_id: String,
     started_at: DateTime<Utc>,
@@ -83,7 +241,7 @@ struct DiscordAuthor {
     id: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct DiscordChannel {
     id: String,
     name: Option<String>,
@@ -166,17 +324,23 @@ async fn main() -> Result<()> {
     ensure_analytics_schema(&pool).await?;
 
     let queue = RedisEventQueue::new(&settings.redis_url)?;
+    let store = PostgresRawEventStore::new(pool.clone());
     for stream in stream_names() {
         queue.create_consumer_group(stream, stream).await?;
     }
 
     let ctx = Arc::new(WorkerContext {
+        backfill_channel_concurrency: settings.worker_backfill_channel_concurrency.max(1),
         backfill_page_delay: Duration::from_millis(settings.worker_backfill_page_delay_ms),
         discord_api_base_url: settings.discord_api_base_url.clone(),
         discord_http: Client::new(),
+        discord_limiter: Arc::new(DiscordRequestLimiter::new(
+            settings.worker_backfill_channel_concurrency.max(1),
+        )),
         discord_token: settings.discord_token,
         pool,
         queue,
+        store,
     });
     let mut tasks = Vec::new();
     let metrics_addr: SocketAddr = settings
@@ -296,8 +460,20 @@ async fn process_delivery(ctx: &WorkerContext, delivery: &QueueDelivery) -> Resu
         return Ok(());
     }
 
-    let envelope: EventEnvelope =
-        serde_json::from_str(&delivery.payload).context("failed to decode event envelope")?;
+    let envelope = if let Ok(event_ref) = serde_json::from_str::<QueuedEventRef>(&delivery.payload)
+    {
+        ctx.store
+            .find_by_id(event_ref.raw_event_id)
+            .await?
+            .with_context(|| {
+                format!(
+                    "raw event {} missing for queued delivery {}",
+                    event_ref.raw_event_id, delivery.id
+                )
+            })?
+    } else {
+        serde_json::from_str(&delivery.payload).context("failed to decode event envelope")?
+    };
     process_event(ctx, &envelope).await
 }
 
@@ -855,57 +1031,108 @@ async fn run_backfill_job(ctx: &WorkerContext, job: &BackfillJob) -> Result<i64>
     upsert_channel_inventory(&ctx.pool, &job.guild_id, &channels).await?;
     let mut inserted_count = 0_i64;
 
-    for channel in channels.into_iter().filter(is_message_backfillable_channel) {
-        let mut before: Option<String> = None;
+    let backfillable_channels = channels
+        .into_iter()
+        .filter(is_message_backfillable_channel)
+        .collect::<Vec<_>>();
+    let max_in_flight = ctx
+        .backfill_channel_concurrency
+        .min(backfillable_channels.len())
+        .max(1);
+    let shared_ctx = Arc::new(ctx.clone());
+    let mut next_channel_index = 0usize;
+    let mut join_set = task::JoinSet::new();
 
-        loop {
-            let messages = fetch_channel_messages(ctx, &channel.id, before.as_deref()).await?;
-            if messages.is_empty() {
-                break;
+    while next_channel_index < max_in_flight {
+        let task_ctx = Arc::clone(&shared_ctx);
+        let channel = backfillable_channels[next_channel_index].clone();
+        let guild_id = job.guild_id.clone();
+        let start_at = job.start_at;
+        let end_at = job.end_at;
+        join_set.spawn(async move {
+            run_backfill_channel(task_ctx.as_ref(), guild_id, start_at, end_at, channel).await
+        });
+        next_channel_index += 1;
+    }
+
+    while let Some(result) = join_set.join_next().await {
+        inserted_count += result.context("backfill channel task panicked")??;
+
+        if next_channel_index < backfillable_channels.len() {
+            let task_ctx = Arc::clone(&shared_ctx);
+            let channel = backfillable_channels[next_channel_index].clone();
+            let guild_id = job.guild_id.clone();
+            let start_at = job.start_at;
+            let end_at = job.end_at;
+            join_set.spawn(async move {
+                run_backfill_channel(task_ctx.as_ref(), guild_id, start_at, end_at, channel).await
+            });
+            next_channel_index += 1;
+        }
+    }
+
+    let rebuild_scope = BackfillRebuildScope::new(job.guild_id.clone(), job.start_at, job.end_at);
+    rebuild_message_analytics_for_scope(&ctx.pool, &ctx.queue, &rebuild_scope).await?;
+
+    Ok(inserted_count)
+}
+
+async fn run_backfill_channel(
+    ctx: &WorkerContext,
+    guild_id: String,
+    start_at: DateTime<Utc>,
+    end_at: DateTime<Utc>,
+    channel: DiscordChannel,
+) -> Result<i64> {
+    let mut inserted_count = 0_i64;
+    let mut before: Option<String> = None;
+
+    loop {
+        let messages = fetch_channel_messages(ctx, &channel.id, before.as_deref()).await?;
+        if messages.is_empty() {
+            break;
+        }
+
+        let mut reached_start = false;
+        let mut page_messages = Vec::new();
+        for message in &messages {
+            if message.timestamp < start_at {
+                reached_start = true;
+                continue;
             }
 
-            let mut reached_start = false;
-            for message in &messages {
-                if message.timestamp < job.start_at {
-                    reached_start = true;
-                    continue;
-                }
-
-                if message.timestamp > job.end_at {
-                    continue;
-                }
-
-                let indexed = IndexedMessage {
-                    attachment_count: i32::try_from(message.attachments.len()).unwrap_or(i32::MAX),
-                    author_id: message.author.id.clone(),
-                    channel_id: channel.id.clone(),
-                    content_length: i32::try_from(message.content.chars().count())
-                        .unwrap_or(i32::MAX),
-                    guild_id: job.guild_id.clone(),
-                    is_bot: message.author.bot.unwrap_or(false),
-                    is_reply: message.referenced_message.is_some()
-                        || message.message_reference.is_some(),
-                    message_id: message.id.clone(),
-                    occurred_at: message.timestamp,
-                    source: "backfill",
-                };
-
-                let inserted = insert_message_index(&ctx.pool, &indexed).await?;
-                if inserted {
-                    increment_public_message_count(&ctx.pool).await?;
-                    apply_message_aggregates(&ctx.pool, &indexed).await?;
-                    inserted_count += 1;
-                }
+            if message.timestamp > end_at {
+                continue;
             }
 
-            if reached_start || messages.len() < 100 {
-                break;
-            }
+            page_messages.push(IndexedMessage {
+                attachment_count: i32::try_from(message.attachments.len()).unwrap_or(i32::MAX),
+                author_id: message.author.id.clone(),
+                channel_id: channel.id.clone(),
+                content_length: i32::try_from(message.content.chars().count()).unwrap_or(i32::MAX),
+                guild_id: guild_id.clone(),
+                is_bot: message.author.bot.unwrap_or(false),
+                is_reply: message.referenced_message.is_some()
+                    || message.message_reference.is_some(),
+                message_id: message.id.clone(),
+                occurred_at: message.timestamp,
+                source: "backfill",
+            });
+        }
 
-            before = messages.last().map(|message| message.id.clone());
-            if !ctx.backfill_page_delay.is_zero() {
-                tokio::time::sleep(ctx.backfill_page_delay).await;
-            }
+        let inserted_messages = insert_message_index_batch(&ctx.pool, &page_messages).await?;
+        if !inserted_messages.is_empty() {
+            increment_public_message_count_by(&ctx.pool, inserted_messages.len() as i64).await?;
+            inserted_count += i64::try_from(inserted_messages.len()).unwrap_or(i64::MAX);
+        }
+
+        if reached_start || messages.len() < 100 {
+            break;
+        }
+
+        before = messages.last().map(|message| message.id.clone());
+        if !ctx.backfill_page_delay.is_zero() {
+            tokio::time::sleep(ctx.backfill_page_delay).await;
         }
     }
 
@@ -1030,6 +1257,7 @@ where
     let mut attempts = 0usize;
     let endpoint = discord_endpoint_label(url);
     loop {
+        let _permit = ctx.discord_limiter.acquire().await;
         let started = Instant::now();
         let response = ctx
             .discord_http
@@ -1054,6 +1282,9 @@ where
             let body = serde_json::from_slice::<DiscordRateLimitResponse>(&body_bytes)
                 .context("failed to parse discord rate limit response")?;
             let delay_ms = (body.retry_after * 1000.0).ceil() as u64;
+            ctx.discord_limiter
+                .on_rate_limit(Duration::from_millis(delay_ms.max(250)))
+                .await;
             tokio::time::sleep(Duration::from_millis(delay_ms.max(250))).await;
             attempts += 1;
             continue;
@@ -1064,6 +1295,7 @@ where
             anyhow::bail!("discord request failed with {status}: {body}");
         }
 
+        ctx.discord_limiter.on_success().await;
         return serde_json::from_slice::<T>(&body_bytes)
             .with_context(|| format!("failed to decode discord response from {url}"));
     }
@@ -1107,6 +1339,148 @@ async fn insert_message_index(pool: &PgPool, message: &IndexedMessage) -> Result
     .context("failed to upsert message index")?;
 
     Ok(inserted)
+}
+
+async fn insert_message_index_batch(
+    pool: &PgPool,
+    messages: &[IndexedMessage],
+) -> Result<Vec<IndexedMessage>> {
+    if messages.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut message_ids = Vec::with_capacity(messages.len());
+    let mut guild_ids = Vec::with_capacity(messages.len());
+    let mut channel_ids = Vec::with_capacity(messages.len());
+    let mut author_ids = Vec::with_capacity(messages.len());
+    let mut is_bots = Vec::with_capacity(messages.len());
+    let mut is_replies = Vec::with_capacity(messages.len());
+    let mut attachment_counts = Vec::with_capacity(messages.len());
+    let mut content_lengths = Vec::with_capacity(messages.len());
+    let mut occurred_ats = Vec::with_capacity(messages.len());
+    let mut sources = Vec::with_capacity(messages.len());
+
+    for message in messages {
+        message_ids.push(message.message_id.clone());
+        guild_ids.push(message.guild_id.clone());
+        channel_ids.push(message.channel_id.clone());
+        author_ids.push(message.author_id.clone());
+        is_bots.push(message.is_bot);
+        is_replies.push(message.is_reply);
+        attachment_counts.push(message.attachment_count);
+        content_lengths.push(message.content_length);
+        occurred_ats.push(message.occurred_at);
+        sources.push(message.source.to_string());
+    }
+
+    let inserted_rows = sqlx::query_as::<_, InsertedIndexedMessageRow>(
+        r#"
+        WITH input AS (
+            SELECT *
+            FROM UNNEST(
+                $1::TEXT[],
+                $2::TEXT[],
+                $3::TEXT[],
+                $4::TEXT[],
+                $5::BOOLEAN[],
+                $6::BOOLEAN[],
+                $7::INTEGER[],
+                $8::INTEGER[],
+                $9::TIMESTAMPTZ[],
+                $10::TEXT[]
+            ) AS batch (
+                message_id,
+                guild_id,
+                channel_id,
+                author_id,
+                is_bot,
+                is_reply,
+                attachment_count,
+                content_length,
+                occurred_at,
+                source
+            )
+        ),
+        inserted AS (
+            INSERT INTO message_index (
+                message_id,
+                guild_id,
+                channel_id,
+                author_id,
+                is_bot,
+                is_reply,
+                attachment_count,
+                content_length,
+                occurred_at,
+                source
+            )
+            SELECT
+                message_id,
+                guild_id,
+                channel_id,
+                author_id,
+                is_bot,
+                is_reply,
+                attachment_count,
+                content_length,
+                occurred_at,
+                source
+            FROM input
+            ON CONFLICT (message_id) DO NOTHING
+            RETURNING
+                message_id,
+                guild_id,
+                channel_id,
+                author_id,
+                is_bot,
+                is_reply,
+                attachment_count,
+                content_length,
+                occurred_at
+        )
+        SELECT
+            attachment_count,
+            author_id,
+            channel_id,
+            content_length,
+            guild_id,
+            is_bot,
+            is_reply,
+            message_id,
+            occurred_at
+        FROM inserted
+        ORDER BY occurred_at ASC, message_id ASC
+        "#,
+    )
+    .bind(message_ids)
+    .bind(guild_ids)
+    .bind(channel_ids)
+    .bind(author_ids)
+    .bind(is_bots)
+    .bind(is_replies)
+    .bind(attachment_counts)
+    .bind(content_lengths)
+    .bind(occurred_ats)
+    .bind(sources)
+    .fetch_all(pool)
+    .await
+    .context("failed to batch upsert message index")?;
+
+    Ok(inserted_rows
+        .into_iter()
+        .map(|row| IndexedMessage {
+            attachment_count: row.attachment_count,
+            author_id: row.author_id,
+            channel_id: row.channel_id,
+            content_length: row.content_length,
+            guild_id: row.guild_id,
+            is_bot: row.is_bot,
+            is_reply: row.is_reply,
+            message_id: row.message_id,
+            occurred_at: row.occurred_at,
+            source: "backfill",
+        })
+        .collect())
 }
 
 async fn apply_message_aggregates(pool: &PgPool, message: &IndexedMessage) -> Result<()> {
@@ -2264,14 +2638,19 @@ async fn increment_channel_retention_counter(
 }
 
 async fn increment_public_message_count(pool: &PgPool) -> Result<()> {
+    increment_public_message_count_by(pool, 1).await
+}
+
+async fn increment_public_message_count_by(pool: &PgPool, count: i64) -> Result<()> {
     sqlx::query(
         r#"
         UPDATE public_stats_cache
-        SET messages_tracked = messages_tracked + 1,
+        SET messages_tracked = messages_tracked + $1,
             refreshed_at = NOW()
         WHERE cache_key = 'global'
         "#,
     )
+    .bind(count)
     .execute(pool)
     .await
     .context("failed to increment public stats cache")?;
@@ -2300,6 +2679,1260 @@ async fn refresh_public_stats_cache(pool: &PgPool) -> Result<()> {
     .context("failed to refresh public stats cache")?;
 
     Ok(())
+}
+
+async fn rebuild_message_analytics_for_scope(
+    pool: &PgPool,
+    queue: &RedisEventQueue,
+    scope: &BackfillRebuildScope,
+) -> Result<()> {
+    rebuild_member_lifecycle_from_messages_in_scope(pool, scope).await?;
+    rebuild_member_daily_activity_from_messages_in_scope(pool, scope).await?;
+    rebuild_guild_daily_active_members_in_scope(pool, scope).await?;
+    rebuild_channel_daily_unique_senders_in_scope(pool, scope).await?;
+    rebuild_channel_daily_activity_from_messages_in_scope(pool, scope).await?;
+    rebuild_channel_health_daily_from_activity_in_scope(pool, scope).await?;
+    rebuild_guild_daily_activity_from_messages_in_scope(pool, scope).await?;
+    rebuild_guild_onboarded_members_in_scope(pool, scope).await?;
+    rebuild_activation_funnel_member_markers_in_scope(pool, scope).await?;
+    rebuild_retention_cohort_members_in_scope(pool, scope).await?;
+    rebuild_channel_retention_members_in_scope(pool, scope).await?;
+    rebuild_retention_cohorts_in_scope(pool, scope).await?;
+    rebuild_channel_retention_daily_in_scope(pool, scope).await?;
+    rebuild_activation_funnel_daily_in_scope(pool, scope).await?;
+    rebuild_guild_summary_daily_in_scope(pool, scope).await?;
+    recount_public_message_count(pool).await?;
+    refresh_public_stats_cache(pool).await?;
+    invalidate_dashboard_message_caches(queue, &scope.guild_id).await;
+
+    Ok(())
+}
+
+async fn rebuild_member_lifecycle_from_messages_in_scope(
+    pool: &PgPool,
+    scope: &BackfillRebuildScope,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO member_lifecycle (
+            guild_id,
+            member_id,
+            first_seen_at,
+            first_message_at
+        )
+        SELECT
+            guild_id,
+            author_id AS member_id,
+            MIN(occurred_at) AS first_seen_at,
+            MIN(occurred_at) AS first_message_at
+        FROM message_index
+        WHERE guild_id = $1
+          AND is_bot = FALSE
+          AND occurred_at >= $2
+          AND occurred_at <= $3
+        GROUP BY guild_id, author_id
+        ON CONFLICT (guild_id, member_id)
+        DO UPDATE SET
+            first_seen_at = LEAST(member_lifecycle.first_seen_at, EXCLUDED.first_seen_at),
+            first_message_at = CASE
+                WHEN member_lifecycle.first_message_at IS NULL THEN EXCLUDED.first_message_at
+                ELSE LEAST(member_lifecycle.first_message_at, EXCLUDED.first_message_at)
+            END
+        "#,
+    )
+    .bind(&scope.guild_id)
+    .bind(scope.activity_start_at)
+    .bind(scope.activity_end_at)
+    .execute(pool)
+    .await
+    .context("failed to rebuild member_lifecycle from messages")?;
+
+    Ok(())
+}
+
+async fn rebuild_member_daily_activity_from_messages_in_scope(
+    pool: &PgPool,
+    scope: &BackfillRebuildScope,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        DELETE FROM member_daily_activity
+        WHERE guild_id = $1
+          AND activity_date >= $2
+          AND activity_date <= $3
+        "#,
+    )
+    .bind(&scope.guild_id)
+    .bind(scope.activity_start_date)
+    .bind(scope.activity_end_date)
+    .execute(pool)
+    .await
+    .context("failed to clear member_daily_activity for rebuild")?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO member_daily_activity (
+            guild_id,
+            member_id,
+            activity_date,
+            messages_sent,
+            reactions_added,
+            voice_seconds,
+            active_channels,
+            was_active,
+            last_active_at,
+            last_channel_id
+        )
+        SELECT
+            guild_id,
+            author_id AS member_id,
+            DATE(occurred_at) AS activity_date,
+            COUNT(*)::INTEGER AS messages_sent,
+            0 AS reactions_added,
+            0::BIGINT AS voice_seconds,
+            COUNT(DISTINCT channel_id)::INTEGER AS active_channels,
+            TRUE AS was_active,
+            MAX(occurred_at) AS last_active_at,
+            (ARRAY_AGG(channel_id ORDER BY occurred_at DESC, message_id DESC))[1] AS last_channel_id
+        FROM message_index
+        WHERE guild_id = $1
+          AND is_bot = FALSE
+          AND DATE(occurred_at) >= $2
+          AND DATE(occurred_at) <= $3
+        GROUP BY guild_id, author_id, DATE(occurred_at)
+        ON CONFLICT (guild_id, member_id, activity_date)
+        DO UPDATE SET
+            messages_sent = EXCLUDED.messages_sent,
+            active_channels = GREATEST(
+                member_daily_activity.active_channels,
+                EXCLUDED.active_channels
+            ),
+            was_active = TRUE,
+            last_channel_id = CASE
+                WHEN member_daily_activity.last_active_at > EXCLUDED.last_active_at
+                    THEN member_daily_activity.last_channel_id
+                ELSE EXCLUDED.last_channel_id
+            END,
+            last_active_at = GREATEST(
+                member_daily_activity.last_active_at,
+                EXCLUDED.last_active_at
+            )
+        "#,
+    )
+    .bind(&scope.guild_id)
+    .bind(scope.activity_start_date)
+    .bind(scope.activity_end_date)
+    .execute(pool)
+    .await
+    .context("failed to rebuild member_daily_activity from messages")?;
+
+    Ok(())
+}
+
+async fn rebuild_guild_daily_active_members_in_scope(
+    pool: &PgPool,
+    scope: &BackfillRebuildScope,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        DELETE FROM guild_daily_active_members
+        WHERE guild_id = $1
+          AND activity_date >= $2
+          AND activity_date <= $3
+        "#,
+    )
+    .bind(&scope.guild_id)
+    .bind(scope.activity_start_date)
+    .bind(scope.activity_end_date)
+    .execute(pool)
+    .await
+    .context("failed to clear guild_daily_active_members for rebuild")?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO guild_daily_active_members (
+            guild_id,
+            activity_date,
+            member_id
+        )
+        SELECT guild_id, activity_date, member_id
+        FROM member_daily_activity
+        WHERE guild_id = $1
+          AND activity_date >= $2
+          AND activity_date <= $3
+          AND (
+                was_active = TRUE
+                OR messages_sent > 0
+                OR reactions_added > 0
+                OR voice_seconds > 0
+          )
+        ON CONFLICT DO NOTHING
+        "#,
+    )
+    .bind(&scope.guild_id)
+    .bind(scope.activity_start_date)
+    .bind(scope.activity_end_date)
+    .execute(pool)
+    .await
+    .context("failed to rebuild guild_daily_active_members")?;
+
+    Ok(())
+}
+
+async fn rebuild_channel_daily_unique_senders_in_scope(
+    pool: &PgPool,
+    scope: &BackfillRebuildScope,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        DELETE FROM channel_daily_unique_senders
+        WHERE guild_id = $1
+          AND activity_date >= $2
+          AND activity_date <= $3
+        "#,
+    )
+    .bind(&scope.guild_id)
+    .bind(scope.activity_start_date)
+    .bind(scope.activity_end_date)
+    .execute(pool)
+    .await
+    .context("failed to clear channel_daily_unique_senders for rebuild")?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO channel_daily_unique_senders (
+            guild_id,
+            channel_id,
+            activity_date,
+            member_id
+        )
+        SELECT DISTINCT
+            guild_id,
+            channel_id,
+            DATE(occurred_at) AS activity_date,
+            author_id AS member_id
+        FROM message_index
+        WHERE guild_id = $1
+          AND is_bot = FALSE
+          AND channel_id <> ''
+          AND DATE(occurred_at) >= $2
+          AND DATE(occurred_at) <= $3
+        ON CONFLICT DO NOTHING
+        "#,
+    )
+    .bind(&scope.guild_id)
+    .bind(scope.activity_start_date)
+    .bind(scope.activity_end_date)
+    .execute(pool)
+    .await
+    .context("failed to rebuild channel_daily_unique_senders")?;
+
+    Ok(())
+}
+
+async fn rebuild_channel_daily_activity_from_messages_in_scope(
+    pool: &PgPool,
+    scope: &BackfillRebuildScope,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        DELETE FROM channel_daily_activity
+        WHERE guild_id = $1
+          AND activity_date >= $2
+          AND activity_date <= $3
+        "#,
+    )
+    .bind(&scope.guild_id)
+    .bind(scope.activity_start_date)
+    .bind(scope.activity_end_date)
+    .execute(pool)
+    .await
+    .context("failed to clear channel_daily_activity for rebuild")?;
+
+    sqlx::query(
+        r#"
+        WITH affected_channels AS (
+            SELECT DISTINCT channel_id
+            FROM message_index
+            WHERE guild_id = $1
+              AND channel_id <> ''
+              AND occurred_at >= $2
+              AND occurred_at <= $3
+        ),
+        ordered AS (
+            SELECT
+                message_index.guild_id,
+                message_index.channel_id,
+                DATE(message_index.occurred_at) AS activity_date,
+                message_index.occurred_at,
+                message_index.message_id,
+                message_index.author_id,
+                message_index.is_reply,
+                LAG(message_index.author_id) OVER (
+                    PARTITION BY message_index.guild_id, message_index.channel_id
+                    ORDER BY message_index.occurred_at ASC, message_index.message_id ASC
+                ) AS previous_author_id,
+                LAG(message_index.occurred_at) OVER (
+                    PARTITION BY message_index.guild_id, message_index.channel_id
+                    ORDER BY message_index.occurred_at ASC, message_index.message_id ASC
+                ) AS previous_occurred_at
+            FROM message_index
+            INNER JOIN affected_channels
+                ON affected_channels.channel_id = message_index.channel_id
+            WHERE message_index.guild_id = $1
+              AND message_index.is_bot = FALSE
+              AND message_index.channel_id <> ''
+              AND message_index.occurred_at <= $3
+        )
+        INSERT INTO channel_daily_activity (
+            guild_id,
+            channel_id,
+            activity_date,
+            messages,
+            unique_senders,
+            replies,
+            response_seconds_total,
+            response_samples,
+            last_message_at
+        )
+        SELECT
+            guild_id,
+            channel_id,
+            activity_date,
+            COUNT(*)::INTEGER AS messages,
+            COUNT(DISTINCT author_id)::INTEGER AS unique_senders,
+            SUM(CASE WHEN is_reply THEN 1 ELSE 0 END)::INTEGER AS replies,
+            SUM(
+                CASE
+                    WHEN previous_author_id IS NOT NULL
+                     AND previous_author_id IS DISTINCT FROM author_id
+                     AND EXTRACT(EPOCH FROM (occurred_at - previous_occurred_at)) BETWEEN 0 AND 86400
+                        THEN EXTRACT(EPOCH FROM (occurred_at - previous_occurred_at))::BIGINT
+                    ELSE 0::BIGINT
+                END
+            )::BIGINT AS response_seconds_total,
+            SUM(
+                CASE
+                    WHEN previous_author_id IS NOT NULL
+                     AND previous_author_id IS DISTINCT FROM author_id
+                     AND EXTRACT(EPOCH FROM (occurred_at - previous_occurred_at)) BETWEEN 0 AND 86400
+                        THEN 1
+                    ELSE 0
+                END
+            )::INTEGER AS response_samples,
+            MAX(occurred_at) AS last_message_at
+        FROM ordered
+        WHERE activity_date >= $4
+          AND activity_date <= $5
+        GROUP BY guild_id, channel_id, activity_date
+        "#,
+    )
+    .bind(&scope.guild_id)
+    .bind(scope.activity_start_at)
+    .bind(scope.activity_end_at)
+    .bind(scope.activity_start_date)
+    .bind(scope.activity_end_date)
+    .execute(pool)
+    .await
+    .context("failed to rebuild channel_daily_activity from messages")?;
+
+    Ok(())
+}
+
+async fn rebuild_channel_health_daily_from_activity_in_scope(
+    pool: &PgPool,
+    scope: &BackfillRebuildScope,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        DELETE FROM channel_health_daily
+        WHERE guild_id = $1
+          AND activity_date >= $2
+          AND activity_date <= $3
+        "#,
+    )
+    .bind(&scope.guild_id)
+    .bind(scope.activity_start_date)
+    .bind(scope.activity_end_date)
+    .execute(pool)
+    .await
+    .context("failed to clear channel_health_daily for rebuild")?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO channel_health_daily (
+            guild_id,
+            channel_id,
+            activity_date,
+            messages,
+            unique_senders,
+            replies,
+            response_seconds_total,
+            response_samples,
+            previous_day_messages,
+            health_score
+        )
+        SELECT
+            current.guild_id,
+            current.channel_id,
+            current.activity_date,
+            current.messages::BIGINT AS messages,
+            current.unique_senders::BIGINT AS unique_senders,
+            current.replies::BIGINT AS replies,
+            current.response_seconds_total::BIGINT AS response_seconds_total,
+            current.response_samples::BIGINT AS response_samples,
+            COALESCE(previous.messages, 0)::BIGINT AS previous_day_messages,
+            ROUND((
+                (
+                    CASE
+                        WHEN current.messages > 0
+                            THEN LEAST(
+                                GREATEST(
+                                    (current.unique_senders::DOUBLE PRECISION
+                                        / current.messages::DOUBLE PRECISION) * 400.0,
+                                    0.0
+                                ),
+                                100.0
+                            )
+                        ELSE 0.0
+                    END
+                    +
+                    CASE
+                        WHEN current.messages > 0
+                            THEN LEAST(
+                                GREATEST(
+                                    (current.replies::DOUBLE PRECISION
+                                        / current.messages::DOUBLE PRECISION) * 200.0,
+                                    0.0
+                                ),
+                                100.0
+                            )
+                        ELSE 0.0
+                    END
+                    +
+                    CASE
+                        WHEN COALESCE(previous.messages, 0) > 0
+                            THEN LEAST(
+                                GREATEST(
+                                    50.0
+                                    + (
+                                        ((current.messages - previous.messages)::DOUBLE PRECISION
+                                            / previous.messages::DOUBLE PRECISION) * 50.0
+                                    ),
+                                    0.0
+                                ),
+                                100.0
+                            )
+                        WHEN current.messages > 0 THEN 70.0
+                        ELSE 0.0
+                    END
+                    +
+                    CASE
+                        WHEN current.response_samples > 0
+                             AND (current.response_seconds_total::DOUBLE PRECISION
+                                 / current.response_samples::DOUBLE PRECISION) <= 300.0
+                            THEN 100.0
+                        WHEN current.response_samples > 0
+                             AND (current.response_seconds_total::DOUBLE PRECISION
+                                 / current.response_samples::DOUBLE PRECISION) <= 1800.0
+                            THEN 80.0
+                        WHEN current.response_samples > 0
+                             AND (current.response_seconds_total::DOUBLE PRECISION
+                                 / current.response_samples::DOUBLE PRECISION) <= 7200.0
+                            THEN 55.0
+                        WHEN current.response_samples > 0 THEN 30.0
+                        ELSE 50.0
+                    END
+                ) / 4.0
+            ) * 10.0) / 10.0 AS health_score
+        FROM channel_daily_activity AS current
+        LEFT JOIN channel_daily_activity AS previous
+            ON previous.guild_id = current.guild_id
+           AND previous.channel_id = current.channel_id
+           AND previous.activity_date = current.activity_date - 1
+        WHERE current.guild_id = $1
+          AND current.activity_date >= $2
+          AND current.activity_date <= $3
+        "#,
+    )
+    .bind(&scope.guild_id)
+    .bind(scope.activity_start_date)
+    .bind(scope.activity_end_date)
+    .execute(pool)
+    .await
+    .context("failed to rebuild channel_health_daily from activity")?;
+
+    Ok(())
+}
+
+async fn rebuild_guild_daily_activity_from_messages_in_scope(
+    pool: &PgPool,
+    scope: &BackfillRebuildScope,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        DELETE FROM guild_daily_activity
+        WHERE guild_id = $1
+          AND activity_date >= $2
+          AND activity_date <= $3
+        "#,
+    )
+    .bind(&scope.guild_id)
+    .bind(scope.activity_start_date)
+    .bind(scope.activity_end_date)
+    .execute(pool)
+    .await
+    .context("failed to clear guild_daily_activity for rebuild")?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO guild_daily_activity (
+            guild_id,
+            activity_date,
+            messages,
+            last_message_at
+        )
+        SELECT
+            guild_id,
+            DATE(occurred_at) AS activity_date,
+            COUNT(*)::BIGINT AS messages,
+            MAX(occurred_at) AS last_message_at
+        FROM message_index
+        WHERE guild_id = $1
+          AND DATE(occurred_at) >= $2
+          AND DATE(occurred_at) <= $3
+        GROUP BY guild_id, DATE(occurred_at)
+        "#,
+    )
+    .bind(&scope.guild_id)
+    .bind(scope.activity_start_date)
+    .bind(scope.activity_end_date)
+    .execute(pool)
+    .await
+    .context("failed to rebuild guild_daily_activity from messages")?;
+
+    Ok(())
+}
+
+async fn rebuild_guild_onboarded_members_in_scope(
+    pool: &PgPool,
+    scope: &BackfillRebuildScope,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        DELETE FROM guild_onboarded_members
+        WHERE guild_id = $1
+          AND member_id IN (
+              SELECT DISTINCT author_id
+              FROM message_index
+              WHERE guild_id = $1
+                AND is_bot = FALSE
+                AND occurred_at >= $2
+                AND occurred_at <= $3
+          )
+        "#,
+    )
+    .bind(&scope.guild_id)
+    .bind(scope.activity_start_at)
+    .bind(scope.activity_end_at)
+    .execute(pool)
+    .await
+    .context("failed to clear guild_onboarded_members for rebuild")?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO guild_onboarded_members (
+            guild_id,
+            member_id,
+            completed_at
+        )
+        SELECT
+            guild_id,
+            member_id,
+            GREATEST(first_role_at, first_message_at) AS completed_at
+        FROM member_lifecycle
+        WHERE guild_id = $1
+          AND member_id IN (
+              SELECT DISTINCT author_id
+              FROM message_index
+              WHERE guild_id = $1
+                AND is_bot = FALSE
+                AND occurred_at >= $2
+                AND occurred_at <= $3
+          )
+          AND first_role_at IS NOT NULL
+          AND first_message_at IS NOT NULL
+        ON CONFLICT DO NOTHING
+        "#,
+    )
+    .bind(&scope.guild_id)
+    .bind(scope.activity_start_at)
+    .bind(scope.activity_end_at)
+    .execute(pool)
+    .await
+    .context("failed to rebuild guild_onboarded_members")?;
+
+    Ok(())
+}
+
+async fn rebuild_activation_funnel_member_markers_in_scope(
+    pool: &PgPool,
+    scope: &BackfillRebuildScope,
+) -> Result<()> {
+    for (table, column) in [
+        ("activation_funnel_role_members", "first_role_at"),
+        ("activation_funnel_message_members", "first_message_at"),
+        ("activation_funnel_reaction_members", "first_reaction_at"),
+        ("activation_funnel_voice_members", "first_voice_at"),
+    ] {
+        let delete_query = format!(
+            "DELETE FROM {table} WHERE guild_id = $1 AND cohort_date >= $2 AND cohort_date <= $3"
+        );
+        sqlx::query(&delete_query)
+            .bind(&scope.guild_id)
+            .bind(scope.cohort_start_date)
+            .bind(scope.cohort_end_date)
+            .execute(pool)
+            .await
+            .with_context(|| format!("failed to clear {table} for rebuild"))?;
+
+        let insert_query = format!(
+            r#"
+            INSERT INTO {table} (
+                guild_id,
+                member_id,
+                cohort_date
+            )
+            SELECT
+                guild_id,
+                member_id,
+                DATE(joined_at) AS cohort_date
+            FROM member_lifecycle
+            WHERE guild_id = $1
+              AND DATE(joined_at) >= $2
+              AND DATE(joined_at) <= $3
+              AND joined_at IS NOT NULL
+              AND {column} IS NOT NULL
+              AND {column} >= joined_at
+            ON CONFLICT DO NOTHING
+            "#
+        );
+        sqlx::query(&insert_query)
+            .bind(&scope.guild_id)
+            .bind(scope.cohort_start_date)
+            .bind(scope.cohort_end_date)
+            .execute(pool)
+            .await
+            .with_context(|| format!("failed to rebuild {table}"))?;
+    }
+
+    Ok(())
+}
+
+async fn rebuild_retention_cohort_members_in_scope(
+    pool: &PgPool,
+    scope: &BackfillRebuildScope,
+) -> Result<()> {
+    for (table, start_day, end_day) in [
+        ("retention_cohort_d7_members", 7_i64, 14_i64),
+        ("retention_cohort_d30_members", 30_i64, 37_i64),
+    ] {
+        let delete_query = format!(
+            "DELETE FROM {table} WHERE guild_id = $1 AND cohort_date >= $2 AND cohort_date <= $3"
+        );
+        sqlx::query(&delete_query)
+            .bind(&scope.guild_id)
+            .bind(scope.cohort_start_date)
+            .bind(scope.cohort_end_date)
+            .execute(pool)
+            .await
+            .with_context(|| format!("failed to clear {table} for rebuild"))?;
+
+        let insert_query = format!(
+            r#"
+            INSERT INTO {table} (
+                guild_id,
+                member_id,
+                cohort_date
+            )
+            SELECT DISTINCT
+                lifecycle.guild_id,
+                lifecycle.member_id,
+                DATE(lifecycle.joined_at) AS cohort_date
+            FROM member_lifecycle AS lifecycle
+            INNER JOIN member_daily_activity AS activity
+                ON activity.guild_id = lifecycle.guild_id
+               AND activity.member_id = lifecycle.member_id
+            WHERE lifecycle.guild_id = $1
+              AND DATE(lifecycle.joined_at) >= $2
+              AND DATE(lifecycle.joined_at) <= $3
+              AND lifecycle.joined_at IS NOT NULL
+              AND activity.activity_date >= DATE(lifecycle.joined_at) + {start_day}
+              AND activity.activity_date < DATE(lifecycle.joined_at) + {end_day}
+            ON CONFLICT DO NOTHING
+            "#
+        );
+        sqlx::query(&insert_query)
+            .bind(&scope.guild_id)
+            .bind(scope.cohort_start_date)
+            .bind(scope.cohort_end_date)
+            .execute(pool)
+            .await
+            .with_context(|| format!("failed to rebuild {table}"))?;
+    }
+
+    Ok(())
+}
+
+async fn rebuild_channel_retention_members_in_scope(
+    pool: &PgPool,
+    scope: &BackfillRebuildScope,
+) -> Result<()> {
+    for (table, retained_table) in [
+        (
+            "channel_retention_d7_members",
+            "retention_cohort_d7_members",
+        ),
+        (
+            "channel_retention_d30_members",
+            "retention_cohort_d30_members",
+        ),
+    ] {
+        let delete_query = format!(
+            "DELETE FROM {table} WHERE guild_id = $1 AND cohort_date >= $2 AND cohort_date <= $3"
+        );
+        sqlx::query(&delete_query)
+            .bind(&scope.guild_id)
+            .bind(scope.cohort_start_date)
+            .bind(scope.cohort_end_date)
+            .execute(pool)
+            .await
+            .with_context(|| format!("failed to clear {table} for rebuild"))?;
+
+        let insert_query = format!(
+            r#"
+            INSERT INTO {table} (
+                guild_id,
+                channel_id,
+                member_id,
+                cohort_date
+            )
+            SELECT DISTINCT
+                retained.guild_id,
+                message.channel_id,
+                retained.member_id,
+                retained.cohort_date
+            FROM {retained_table} AS retained
+            INNER JOIN member_lifecycle AS lifecycle
+                ON lifecycle.guild_id = retained.guild_id
+               AND lifecycle.member_id = retained.member_id
+            INNER JOIN message_index AS message
+                ON message.guild_id = retained.guild_id
+               AND message.author_id = retained.member_id
+            WHERE retained.guild_id = $1
+              AND retained.cohort_date >= $2
+              AND retained.cohort_date <= $3
+              AND lifecycle.joined_at IS NOT NULL
+              AND message.channel_id <> ''
+              AND message.occurred_at >= lifecycle.joined_at
+              AND message.occurred_at < lifecycle.joined_at + INTERVAL '7 days'
+            ON CONFLICT DO NOTHING
+            "#
+        );
+        sqlx::query(&insert_query)
+            .bind(&scope.guild_id)
+            .bind(scope.cohort_start_date)
+            .bind(scope.cohort_end_date)
+            .execute(pool)
+            .await
+            .with_context(|| format!("failed to rebuild {table}"))?;
+    }
+
+    Ok(())
+}
+
+async fn rebuild_retention_cohorts_in_scope(
+    pool: &PgPool,
+    scope: &BackfillRebuildScope,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        DELETE FROM retention_cohorts
+        WHERE guild_id = $1
+          AND cohort_date >= $2
+          AND cohort_date <= $3
+        "#,
+    )
+    .bind(&scope.guild_id)
+    .bind(scope.cohort_start_date)
+    .bind(scope.cohort_end_date)
+    .execute(pool)
+    .await
+    .context("failed to clear retention_cohorts for rebuild")?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO retention_cohorts (
+            guild_id,
+            cohort_date,
+            joined_members,
+            d7_retained_members,
+            d30_retained_members
+        )
+        SELECT
+            guild_id,
+            cohort_date,
+            SUM(joined_members)::BIGINT AS joined_members,
+            SUM(d7_retained_members)::BIGINT AS d7_retained_members,
+            SUM(d30_retained_members)::BIGINT AS d30_retained_members
+        FROM (
+            SELECT
+                guild_id,
+                DATE(joined_at) AS cohort_date,
+                COUNT(*)::BIGINT AS joined_members,
+                0::BIGINT AS d7_retained_members,
+                0::BIGINT AS d30_retained_members
+            FROM member_lifecycle
+            WHERE guild_id = $1
+              AND joined_at IS NOT NULL
+              AND DATE(joined_at) >= $2
+              AND DATE(joined_at) <= $3
+            GROUP BY guild_id, DATE(joined_at)
+            UNION ALL
+            SELECT
+                guild_id,
+                cohort_date,
+                0::BIGINT AS joined_members,
+                COUNT(*)::BIGINT AS d7_retained_members,
+                0::BIGINT AS d30_retained_members
+            FROM retention_cohort_d7_members
+            WHERE guild_id = $1
+              AND cohort_date >= $2
+              AND cohort_date <= $3
+            GROUP BY guild_id, cohort_date
+            UNION ALL
+            SELECT
+                guild_id,
+                cohort_date,
+                0::BIGINT AS joined_members,
+                0::BIGINT AS d7_retained_members,
+                COUNT(*)::BIGINT AS d30_retained_members
+            FROM retention_cohort_d30_members
+            WHERE guild_id = $1
+              AND cohort_date >= $2
+              AND cohort_date <= $3
+            GROUP BY guild_id, cohort_date
+        ) AS combined
+        GROUP BY guild_id, cohort_date
+        "#,
+    )
+    .bind(&scope.guild_id)
+    .bind(scope.cohort_start_date)
+    .bind(scope.cohort_end_date)
+    .execute(pool)
+    .await
+    .context("failed to rebuild retention_cohorts")?;
+
+    Ok(())
+}
+
+async fn rebuild_channel_retention_daily_in_scope(
+    pool: &PgPool,
+    scope: &BackfillRebuildScope,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        DELETE FROM channel_retention_daily
+        WHERE guild_id = $1
+          AND cohort_date >= $2
+          AND cohort_date <= $3
+        "#,
+    )
+    .bind(&scope.guild_id)
+    .bind(scope.cohort_start_date)
+    .bind(scope.cohort_end_date)
+    .execute(pool)
+    .await
+    .context("failed to clear channel_retention_daily for rebuild")?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO channel_retention_daily (
+            guild_id,
+            channel_id,
+            cohort_date,
+            d7_retained_members,
+            d30_retained_members
+        )
+        SELECT
+            guild_id,
+            channel_id,
+            cohort_date,
+            SUM(d7_retained_members)::BIGINT AS d7_retained_members,
+            SUM(d30_retained_members)::BIGINT AS d30_retained_members
+        FROM (
+            SELECT
+                guild_id,
+                channel_id,
+                cohort_date,
+                COUNT(*)::BIGINT AS d7_retained_members,
+                0::BIGINT AS d30_retained_members
+            FROM channel_retention_d7_members
+            WHERE guild_id = $1
+              AND cohort_date >= $2
+              AND cohort_date <= $3
+            GROUP BY guild_id, channel_id, cohort_date
+            UNION ALL
+            SELECT
+                guild_id,
+                channel_id,
+                cohort_date,
+                0::BIGINT AS d7_retained_members,
+                COUNT(*)::BIGINT AS d30_retained_members
+            FROM channel_retention_d30_members
+            WHERE guild_id = $1
+              AND cohort_date >= $2
+              AND cohort_date <= $3
+            GROUP BY guild_id, channel_id, cohort_date
+        ) AS combined
+        GROUP BY guild_id, channel_id, cohort_date
+        "#,
+    )
+    .bind(&scope.guild_id)
+    .bind(scope.cohort_start_date)
+    .bind(scope.cohort_end_date)
+    .execute(pool)
+    .await
+    .context("failed to rebuild channel_retention_daily")?;
+
+    Ok(())
+}
+
+async fn rebuild_activation_funnel_daily_in_scope(
+    pool: &PgPool,
+    scope: &BackfillRebuildScope,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        DELETE FROM activation_funnel_daily
+        WHERE guild_id = $1
+          AND cohort_date >= $2
+          AND cohort_date <= $3
+        "#,
+    )
+    .bind(&scope.guild_id)
+    .bind(scope.cohort_start_date)
+    .bind(scope.cohort_end_date)
+    .execute(pool)
+    .await
+    .context("failed to clear activation_funnel_daily for rebuild")?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO activation_funnel_daily (
+            guild_id,
+            cohort_date,
+            joined_members,
+            got_role_members,
+            first_message_members,
+            first_reaction_members,
+            first_voice_members,
+            returned_next_week_members
+        )
+        SELECT
+            guild_id,
+            cohort_date,
+            SUM(joined_members)::BIGINT AS joined_members,
+            SUM(got_role_members)::BIGINT AS got_role_members,
+            SUM(first_message_members)::BIGINT AS first_message_members,
+            SUM(first_reaction_members)::BIGINT AS first_reaction_members,
+            SUM(first_voice_members)::BIGINT AS first_voice_members,
+            SUM(returned_next_week_members)::BIGINT AS returned_next_week_members
+        FROM (
+            SELECT
+                guild_id,
+                DATE(joined_at) AS cohort_date,
+                COUNT(*)::BIGINT AS joined_members,
+                0::BIGINT AS got_role_members,
+                0::BIGINT AS first_message_members,
+                0::BIGINT AS first_reaction_members,
+                0::BIGINT AS first_voice_members,
+                0::BIGINT AS returned_next_week_members
+            FROM member_lifecycle
+            WHERE guild_id = $1
+              AND joined_at IS NOT NULL
+              AND DATE(joined_at) >= $2
+              AND DATE(joined_at) <= $3
+            GROUP BY guild_id, DATE(joined_at)
+            UNION ALL
+            SELECT
+                guild_id,
+                cohort_date,
+                0::BIGINT AS joined_members,
+                COUNT(*)::BIGINT AS got_role_members,
+                0::BIGINT AS first_message_members,
+                0::BIGINT AS first_reaction_members,
+                0::BIGINT AS first_voice_members,
+                0::BIGINT AS returned_next_week_members
+            FROM activation_funnel_role_members
+            WHERE guild_id = $1
+              AND cohort_date >= $2
+              AND cohort_date <= $3
+            GROUP BY guild_id, cohort_date
+            UNION ALL
+            SELECT
+                guild_id,
+                cohort_date,
+                0::BIGINT AS joined_members,
+                0::BIGINT AS got_role_members,
+                COUNT(*)::BIGINT AS first_message_members,
+                0::BIGINT AS first_reaction_members,
+                0::BIGINT AS first_voice_members,
+                0::BIGINT AS returned_next_week_members
+            FROM activation_funnel_message_members
+            WHERE guild_id = $1
+              AND cohort_date >= $2
+              AND cohort_date <= $3
+            GROUP BY guild_id, cohort_date
+            UNION ALL
+            SELECT
+                guild_id,
+                cohort_date,
+                0::BIGINT AS joined_members,
+                0::BIGINT AS got_role_members,
+                0::BIGINT AS first_message_members,
+                COUNT(*)::BIGINT AS first_reaction_members,
+                0::BIGINT AS first_voice_members,
+                0::BIGINT AS returned_next_week_members
+            FROM activation_funnel_reaction_members
+            WHERE guild_id = $1
+              AND cohort_date >= $2
+              AND cohort_date <= $3
+            GROUP BY guild_id, cohort_date
+            UNION ALL
+            SELECT
+                guild_id,
+                cohort_date,
+                0::BIGINT AS joined_members,
+                0::BIGINT AS got_role_members,
+                0::BIGINT AS first_message_members,
+                0::BIGINT AS first_reaction_members,
+                COUNT(*)::BIGINT AS first_voice_members,
+                0::BIGINT AS returned_next_week_members
+            FROM activation_funnel_voice_members
+            WHERE guild_id = $1
+              AND cohort_date >= $2
+              AND cohort_date <= $3
+            GROUP BY guild_id, cohort_date
+            UNION ALL
+            SELECT
+                guild_id,
+                cohort_date,
+                0::BIGINT AS joined_members,
+                0::BIGINT AS got_role_members,
+                0::BIGINT AS first_message_members,
+                0::BIGINT AS first_reaction_members,
+                0::BIGINT AS first_voice_members,
+                COUNT(*)::BIGINT AS returned_next_week_members
+            FROM retention_cohort_d7_members
+            WHERE guild_id = $1
+              AND cohort_date >= $2
+              AND cohort_date <= $3
+            GROUP BY guild_id, cohort_date
+        ) AS combined
+        GROUP BY guild_id, cohort_date
+        "#,
+    )
+    .bind(&scope.guild_id)
+    .bind(scope.cohort_start_date)
+    .bind(scope.cohort_end_date)
+    .execute(pool)
+    .await
+    .context("failed to rebuild activation_funnel_daily")?;
+
+    Ok(())
+}
+
+async fn rebuild_guild_summary_daily_in_scope(
+    pool: &PgPool,
+    scope: &BackfillRebuildScope,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        DELETE FROM guild_summary_daily
+        WHERE guild_id = $1
+          AND summary_date >= $2
+          AND summary_date <= $3
+        "#,
+    )
+    .bind(&scope.guild_id)
+    .bind(scope.cohort_start_date)
+    .bind(scope.activity_end_date)
+    .execute(pool)
+    .await
+    .context("failed to clear guild_summary_daily for rebuild")?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO guild_summary_daily (
+            guild_id,
+            summary_date,
+            messages,
+            active_members,
+            joined_members,
+            left_members,
+            onboarded_members,
+            last_message_at
+        )
+        SELECT
+            guild_id,
+            summary_date,
+            SUM(messages)::BIGINT AS messages,
+            SUM(active_members)::BIGINT AS active_members,
+            SUM(joined_members)::BIGINT AS joined_members,
+            SUM(left_members)::BIGINT AS left_members,
+            SUM(onboarded_members)::BIGINT AS onboarded_members,
+            MAX(last_message_at) AS last_message_at
+        FROM (
+            SELECT
+                guild_id,
+                activity_date AS summary_date,
+                messages,
+                0::BIGINT AS active_members,
+                0::BIGINT AS joined_members,
+                0::BIGINT AS left_members,
+                0::BIGINT AS onboarded_members,
+                last_message_at
+            FROM guild_daily_activity
+            WHERE guild_id = $1
+              AND activity_date >= $2
+              AND activity_date <= $3
+            UNION ALL
+            SELECT
+                guild_id,
+                activity_date AS summary_date,
+                0::BIGINT AS messages,
+                COUNT(*)::BIGINT AS active_members,
+                0::BIGINT AS joined_members,
+                0::BIGINT AS left_members,
+                0::BIGINT AS onboarded_members,
+                activity_date::timestamp AT TIME ZONE 'UTC' AS last_message_at
+            FROM guild_daily_active_members
+            WHERE guild_id = $1
+              AND activity_date >= $2
+              AND activity_date <= $3
+            GROUP BY guild_id, activity_date
+            UNION ALL
+            SELECT
+                guild_id,
+                DATE(joined_at) AS summary_date,
+                0::BIGINT AS messages,
+                0::BIGINT AS active_members,
+                COUNT(*)::BIGINT AS joined_members,
+                0::BIGINT AS left_members,
+                0::BIGINT AS onboarded_members,
+                DATE(joined_at)::timestamp AT TIME ZONE 'UTC' AS last_message_at
+            FROM guild_joined_members
+            WHERE guild_id = $1
+              AND DATE(joined_at) >= $2
+              AND DATE(joined_at) <= $3
+            GROUP BY guild_id, DATE(joined_at)
+            UNION ALL
+            SELECT
+                guild_id,
+                DATE(left_at) AS summary_date,
+                0::BIGINT AS messages,
+                0::BIGINT AS active_members,
+                0::BIGINT AS joined_members,
+                COUNT(*)::BIGINT AS left_members,
+                0::BIGINT AS onboarded_members,
+                DATE(left_at)::timestamp AT TIME ZONE 'UTC' AS last_message_at
+            FROM guild_left_members
+            WHERE guild_id = $1
+              AND DATE(left_at) >= $2
+              AND DATE(left_at) <= $3
+            GROUP BY guild_id, DATE(left_at)
+            UNION ALL
+            SELECT
+                lifecycle.guild_id,
+                DATE(lifecycle.joined_at) AS summary_date,
+                0::BIGINT AS messages,
+                0::BIGINT AS active_members,
+                0::BIGINT AS joined_members,
+                0::BIGINT AS left_members,
+                COUNT(*)::BIGINT AS onboarded_members,
+                DATE(lifecycle.joined_at)::timestamp AT TIME ZONE 'UTC' AS last_message_at
+            FROM guild_onboarded_members AS onboarded
+            INNER JOIN member_lifecycle AS lifecycle
+                ON lifecycle.guild_id = onboarded.guild_id
+               AND lifecycle.member_id = onboarded.member_id
+            WHERE onboarded.guild_id = $1
+              AND lifecycle.joined_at IS NOT NULL
+              AND DATE(lifecycle.joined_at) >= $2
+              AND DATE(lifecycle.joined_at) <= $3
+            GROUP BY lifecycle.guild_id, DATE(lifecycle.joined_at)
+        ) AS combined
+        GROUP BY guild_id, summary_date
+        "#,
+    )
+    .bind(&scope.guild_id)
+    .bind(scope.cohort_start_date)
+    .bind(scope.activity_end_date)
+    .execute(pool)
+    .await
+    .context("failed to rebuild guild_summary_daily")?;
+
+    Ok(())
+}
+
+async fn recount_public_message_count(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO public_stats_cache (
+            cache_key,
+            messages_tracked,
+            servers,
+            members,
+            refreshed_at
+        )
+        SELECT
+            'global',
+            COALESCE((SELECT COUNT(*) FROM message_index), 0)::BIGINT,
+            COALESCE((
+                SELECT COUNT(*)
+                FROM guild_inventory
+                WHERE is_active = TRUE
+            ), 0)::BIGINT,
+            COALESCE((
+                SELECT SUM(member_count)
+                FROM guild_inventory
+                WHERE is_active = TRUE
+            ), 0)::BIGINT,
+            NOW()
+        ON CONFLICT (cache_key)
+        DO UPDATE SET
+            messages_tracked = EXCLUDED.messages_tracked,
+            servers = EXCLUDED.servers,
+            members = EXCLUDED.members,
+            refreshed_at = NOW()
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("failed to recount public message count")?;
+
+    Ok(())
+}
+
+async fn invalidate_dashboard_message_caches(queue: &RedisEventQueue, guild_id: &str) {
+    for resource in ["summary_health", "retention_snapshot", "hotspots"] {
+        for days in 1..=90 {
+            let cache_key = format!("guild:{guild_id}:{resource}:{days}");
+            if let Err(error) = queue.del_key(&cache_key).await {
+                warn!(cache_key, ?error, "failed to invalidate dashboard cache");
+            }
+        }
+    }
 }
 
 async fn ensure_analytics_schema(pool: &PgPool) -> Result<()> {
@@ -4133,6 +5766,13 @@ fn retry_state_key(delivery: &QueueDelivery) -> Result<String> {
         return Ok(format!(
             "worker:retry:{}:{}",
             delivery.stream, envelope.event_id
+        ));
+    }
+
+    if let Ok(event_ref) = serde_json::from_str::<QueuedEventRef>(&delivery.payload) {
+        return Ok(format!(
+            "worker:retry:{}:{}",
+            delivery.stream, event_ref.event_id
         ));
     }
 

@@ -6,6 +6,9 @@ use redis::{
     streams::{StreamPendingReply, StreamRangeReply, StreamReadOptions, StreamReadReply},
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use uuid::Uuid;
+
+use crate::events::EventEnvelope;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueueDelivery {
@@ -19,6 +22,30 @@ pub struct StreamEntry {
     pub id: String,
     pub payload: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueuedEventRef {
+    pub raw_event_id: i64,
+    pub event_id: Uuid,
+    pub event_name: String,
+    pub guild_id: String,
+}
+
+impl QueuedEventRef {
+    pub fn new(raw_event_id: i64, envelope: &EventEnvelope) -> Self {
+        Self {
+            raw_event_id,
+            event_id: envelope.event_id,
+            event_name: envelope.event_name.clone(),
+            guild_id: envelope.guild_id.clone(),
+        }
+    }
+}
+
+pub const PUBLIC_STATS_UPDATES_CHANNEL: &str = "guildest.public_stats";
+pub const PUBLIC_STATS_MESSAGES_KEY: &str = "guildest.public_stats.messages_tracked";
+pub const PUBLIC_STATS_SERVERS_KEY: &str = "guildest.public_stats.servers";
+pub const PUBLIC_STATS_MEMBERS_KEY: &str = "guildest.public_stats.members";
 
 #[async_trait]
 pub trait EventQueue: Send + Sync {
@@ -53,6 +80,13 @@ impl RedisEventQueue {
             .context("failed to connect to redis")
     }
 
+    pub async fn pubsub(&self) -> Result<redis::aio::PubSub> {
+        self.client
+            .get_async_pubsub()
+            .await
+            .context("failed to open redis pubsub connection")
+    }
+
     pub async fn get_json<T: DeserializeOwned>(&self, key: &str) -> Result<Option<T>> {
         let mut conn = self.connection().await?;
         let payload: Option<String> = conn
@@ -68,6 +102,20 @@ impl RedisEventQueue {
             .transpose()
     }
 
+    pub async fn get_string(&self, key: &str) -> Result<Option<String>> {
+        let mut conn = self.connection().await?;
+        conn.get(key)
+            .await
+            .with_context(|| format!("failed to read redis key {key}"))
+    }
+
+    pub async fn mget_strings(&self, keys: &[&str]) -> Result<Vec<Option<String>>> {
+        let mut conn = self.connection().await?;
+        conn.get(keys)
+            .await
+            .with_context(|| format!("failed to read redis keys {}", keys.join(", ")))
+    }
+
     pub async fn set_json<T: Serialize>(
         &self,
         key: &str,
@@ -78,6 +126,14 @@ impl RedisEventQueue {
             .with_context(|| format!("failed to encode redis json for key {key}"))?;
         let mut conn = self.connection().await?;
         conn.set_ex::<_, _, ()>(key, payload, ttl_seconds)
+            .await
+            .with_context(|| format!("failed to write redis key {key}"))?;
+        Ok(())
+    }
+
+    pub async fn set_string(&self, key: &str, value: &str) -> Result<()> {
+        let mut conn = self.connection().await?;
+        conn.set::<_, _, ()>(key, value)
             .await
             .with_context(|| format!("failed to write redis key {key}"))?;
         Ok(())
@@ -184,6 +240,24 @@ impl RedisEventQueue {
             .await
             .with_context(|| format!("failed to delete stream entry for {stream}/{id}"))?;
         Ok(())
+    }
+
+    pub async fn publish_channel(&self, channel: &str, payload: &str) -> Result<()> {
+        let mut conn = self.connection().await?;
+        redis::cmd("PUBLISH")
+            .arg(channel)
+            .arg(payload)
+            .query_async::<i64>(&mut conn)
+            .await
+            .with_context(|| format!("failed to publish redis channel message for {channel}"))?;
+        Ok(())
+    }
+
+    pub async fn incr(&self, key: &str) -> Result<i64> {
+        let mut conn = self.connection().await?;
+        conn.incr(key, 1_i64)
+            .await
+            .with_context(|| format!("failed to increment redis key {key}"))
     }
 
     pub async fn pending_count(&self, stream: &str, group: &str) -> Result<i64> {
@@ -332,7 +406,9 @@ impl EventQueue for RedisEventQueue {
             .arg("CREATE")
             .arg(stream)
             .arg(group)
-            .arg("$")
+            // Start at the beginning for brand-new consumer groups so a fresh worker can
+            // drain backlog that was published before the group existed.
+            .arg("0")
             .arg("MKSTREAM")
             .query_async::<()>(&mut conn)
             .await;

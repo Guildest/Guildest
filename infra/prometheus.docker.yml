@@ -12,3 +12,13 @@ scrape_configs:
     static_configs:
       - targets:
           - host.docker.internal:19091
+
+  - job_name: guildest-gateway
+    static_configs:
+      - targets:
+          - host.docker.internal:9092
+
+  - job_name: guildest-intake-lab
+    static_configs:
+      - targets:
+          - host.docker.internal:29091

@@ -1,0 +1,98 @@
+@import "tailwindcss";
+
+@theme inline {
+  --color-plum: #13111a;
+  --color-plum-light: #1e1b28;
+  --color-surface: #1a1724;
+  --color-surface-light: #232030;
+  --color-border: rgba(255, 255, 255, 0.06);
+  --color-border-light: rgba(255, 255, 255, 0.1);
+  --color-brown: #6b5c4d;
+  --color-tan: #d4a574;
+  --color-sand: #f0d78c;
+  --color-cream: #eeeae2;
+  --font-sans: var(--font-inter);
+  --font-display: var(--font-krona);
+}
+
+body {
+  background: var(--color-plum);
+  color: var(--color-cream);
+}
+
+/* Subtle noise texture on cards */
+.card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 16px;
+}
+
+.card-inner {
+  background: var(--color-surface-light);
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+}
+
+/* Metric card with colored top accent */
+.metric-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 16px;
+  position: relative;
+  overflow: hidden;
+}
+
+.metric-card::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, var(--color-tan), var(--color-sand));
+  opacity: 0.6;
+}
+
+/* Table styling */
+.dashboard-table th {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: rgba(238, 234, 226, 0.4);
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--color-border-light);
+}
+
+.dashboard-table td {
+  padding-top: 12px;
+  padding-bottom: 12px;
+}
+
+.dashboard-table tbody tr {
+  border-bottom: 1px solid var(--color-border);
+  transition: background-color 0.15s;
+}
+
+.dashboard-table tbody tr:hover {
+  background-color: rgba(255, 255, 255, 0.02);
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
+}

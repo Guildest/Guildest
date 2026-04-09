@@ -12,10 +12,12 @@ pub struct Settings {
     pub database_url: String,
     pub redis_url: String,
     pub api_bind_addr: String,
+    pub gateway_metrics_bind_addr: String,
     pub public_api_base_url: String,
     pub public_api_allowed_origin: String,
     pub public_site_url: String,
     pub worker_backfill_page_delay_ms: u64,
+    pub worker_backfill_channel_concurrency: usize,
     pub worker_metrics_bind_addr: String,
     pub worker_consumer_prefix: String,
     pub rust_log: String,
@@ -39,6 +41,8 @@ impl Settings {
             database_url: env::var("DATABASE_URL").context("missing DATABASE_URL")?,
             redis_url: env::var("REDIS_URL").context("missing REDIS_URL")?,
             api_bind_addr: env::var("API_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string()),
+            gateway_metrics_bind_addr: env::var("GATEWAY_METRICS_BIND_ADDR")
+                .unwrap_or_else(|_| "127.0.0.1:9092".to_string()),
             public_api_base_url: env::var("PUBLIC_API_BASE_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:8080".to_string()),
             public_api_allowed_origin: env::var("PUBLIC_API_ALLOWED_ORIGIN")
@@ -49,6 +53,10 @@ impl Settings {
                 .ok()
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(25),
+            worker_backfill_channel_concurrency: env::var("WORKER_BACKFILL_CHANNEL_CONCURRENCY")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(4),
             worker_metrics_bind_addr: env::var("WORKER_METRICS_BIND_ADDR")
                 .unwrap_or_else(|_| "127.0.0.1:9091".to_string()),
             worker_consumer_prefix: env::var("WORKER_CONSUMER_PREFIX")

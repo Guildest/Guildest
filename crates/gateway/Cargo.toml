@@ -6,8 +6,10 @@ version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+axum.workspace = true
 chrono.workspace = true
 common = { path = "../common" }
+prometheus.workspace = true
 serde_json.workspace = true
 serenity.workspace = true
 sqlx.workspace = true

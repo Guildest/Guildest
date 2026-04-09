@@ -1,13 +1,20 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use sqlx::PgPool;
+use sqlx::{PgPool, types::Json};
 
 use crate::events::EventEnvelope;
 
 #[async_trait]
 pub trait RawEventStore: Send + Sync {
     async fn ensure_schema(&self) -> Result<()>;
-    async fn insert(&self, event: &EventEnvelope) -> Result<i64>;
+    async fn insert(&self, event: &EventEnvelope) -> Result<i64> {
+        let payload_json =
+            serde_json::to_string(event).context("failed to serialize raw event payload")?;
+        self.insert_serialized(event, &payload_json).await
+    }
+
+    async fn insert_serialized(&self, event: &EventEnvelope, payload_json: &str) -> Result<i64>;
+    async fn find_by_id(&self, id: i64) -> Result<Option<EventEnvelope>>;
 }
 
 #[derive(Clone)]
@@ -72,8 +79,7 @@ impl RawEventStore for PostgresRawEventStore {
         Ok(())
     }
 
-    async fn insert(&self, event: &EventEnvelope) -> Result<i64> {
-        let payload = serde_json::to_value(event).context("failed to serialize raw event")?;
+    async fn insert_serialized(&self, event: &EventEnvelope, payload_json: &str) -> Result<i64> {
         let row_id = sqlx::query_scalar(
             r#"
             INSERT INTO raw_events (
@@ -87,7 +93,7 @@ impl RawEventStore for PostgresRawEventStore {
                 schema_version,
                 payload_json
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
             RETURNING id
             "#,
         )
@@ -99,11 +105,27 @@ impl RawEventStore for PostgresRawEventStore {
         .bind(event.occurred_at)
         .bind(event.received_at)
         .bind(event.version)
-        .bind(payload)
+        .bind(payload_json)
         .fetch_one(&self.pool)
         .await
         .context("failed to insert raw event")?;
 
         Ok(row_id)
+    }
+
+    async fn find_by_id(&self, id: i64) -> Result<Option<EventEnvelope>> {
+        let payload = sqlx::query_scalar::<_, Json<EventEnvelope>>(
+            r#"
+            SELECT payload_json
+            FROM raw_events
+            WHERE id = $1
+            "#,
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("failed to fetch raw event")?;
+
+        Ok(payload.map(|Json(event)| event))
     }
 }

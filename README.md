@@ -21,6 +21,8 @@ If you want to run only the local infrastructure and keep the Rust processes on 
 3. Run the gateway with `cargo run -p gateway`.
 4. Run the workers with `cargo run -p worker`.
 
+For synthetic worker backfill load without Discord REST, see [docs/worker-backfill-benchmark.md](/Users/ace/projects/guildest-worktrees/parse-footprint-lab/docs/worker-backfill-benchmark.md).
+
 ## Required Discord intents
 
 Enable these bot intents in the Discord developer portal:
@@ -35,10 +37,14 @@ The current implementation tracks metadata and does not require message content 
 The public landing-page stats are served from:
 
 - `GET /v1/public/stats`
+- `GET /v1/public/stats/stream`
 - `GET /v1/public/links`
 - `GET /v1/public/oauth/start/login`
 - `GET /v1/public/oauth/start/invite`
 - `GET /v1/public/install/start`
+
+`/v1/public/stats/stream` is a Server-Sent Events endpoint that pushes updated stats as soon as
+the worker publishes a refresh notification, which avoids client polling delay.
 
 The OAuth callback used by both landing-page CTAs is:
 

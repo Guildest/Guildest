@@ -1,6 +1,11 @@
-use std::sync::Arc;
+use std::{
+    net::SocketAddr,
+    sync::{Arc, OnceLock},
+    time::Instant,
+};
 
 use anyhow::{Context, Result};
+use axum::{Router, extract::State, response::IntoResponse, routing::get};
 use chrono::{DateTime, Utc};
 use common::{
     config::Settings,
@@ -9,9 +14,10 @@ use common::{
         MemberJoinedPayload, MemberLeftPayload, MemberRolesUpdatedPayload, MessageCreatedPayload,
         ReactionAddedPayload, VoiceStateUpdatedPayload,
     },
-    queue::{EventQueue, RedisEventQueue},
+    queue::{EventQueue, QueuedEventRef, RedisEventQueue},
     store::{PostgresRawEventStore, RawEventStore},
 };
+use prometheus::{Encoder, HistogramOpts, HistogramVec, IntCounterVec, Registry, TextEncoder};
 use serenity::{
     Client,
     all::{
@@ -22,8 +28,21 @@ use serenity::{
     prelude::{Context as DiscordContext, EventHandler},
 };
 use sqlx::postgres::PgPoolOptions;
+use tokio::task;
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
+
+static METRICS: OnceLock<GatewayMetrics> = OnceLock::new();
+
+struct GatewayMetrics {
+    event_dispatch_duration_seconds: HistogramVec,
+    event_payload_bytes: HistogramVec,
+    events_published_total: IntCounterVec,
+    events_received_total: IntCounterVec,
+    pipeline_stage_duration_seconds: HistogramVec,
+    publish_failures_total: IntCounterVec,
+    registry: Registry,
+}
 
 struct Pipeline {
     queue: RedisEventQueue,
@@ -32,10 +51,86 @@ struct Pipeline {
 
 impl Pipeline {
     async fn publish(&self, envelope: EventEnvelope) -> Result<()> {
-        self.store.insert(&envelope).await?;
-        let payload =
-            serde_json::to_string(&envelope).context("failed to serialize queue event")?;
-        self.queue.publish(envelope.stream_name(), &payload).await?;
+        let event_name = envelope.event_name.clone();
+        let serialize_started = Instant::now();
+        let payload = match serde_json::to_string(&envelope) {
+            Ok(payload) => {
+                observe_pipeline_stage(
+                    &event_name,
+                    "serialize",
+                    "success",
+                    serialize_started.elapsed().as_secs_f64(),
+                );
+                payload
+            }
+            Err(error) => {
+                observe_pipeline_stage(
+                    &event_name,
+                    "serialize",
+                    "failure",
+                    serialize_started.elapsed().as_secs_f64(),
+                );
+                observe_publish_failure(&event_name, "serialize");
+                return Err(error).context("failed to serialize queue event");
+            }
+        };
+        observe_payload_size(&event_name, payload.len());
+
+        let persist_started = Instant::now();
+        let raw_event_id = self
+            .store
+            .insert_serialized(&envelope, &payload)
+            .await
+            .map_err(|error| {
+                observe_pipeline_stage(
+                    &event_name,
+                    "persist",
+                    "failure",
+                    persist_started.elapsed().as_secs_f64(),
+                );
+                observe_publish_failure(&event_name, "persist");
+                error
+            })?;
+        observe_pipeline_stage(
+            &event_name,
+            "persist",
+            "success",
+            persist_started.elapsed().as_secs_f64(),
+        );
+
+        let queue_started = Instant::now();
+        let queue_payload = serde_json::to_string(&QueuedEventRef::new(raw_event_id, &envelope))
+            .map_err(|error| {
+                observe_pipeline_stage(
+                    &event_name,
+                    "queue",
+                    "failure",
+                    queue_started.elapsed().as_secs_f64(),
+                );
+                observe_publish_failure(&event_name, "queue");
+                error
+            })
+            .context("failed to serialize queue event reference")?;
+        self.queue
+            .publish(envelope.stream_name(), &queue_payload)
+            .await
+            .map_err(|error| {
+                observe_pipeline_stage(
+                    &event_name,
+                    "queue",
+                    "failure",
+                    queue_started.elapsed().as_secs_f64(),
+                );
+                observe_publish_failure(&event_name, "queue");
+                error
+            })?;
+        observe_pipeline_stage(
+            &event_name,
+            "queue",
+            "success",
+            queue_started.elapsed().as_secs_f64(),
+        );
+        observe_published_event(&event_name);
         Ok(())
     }
 }
@@ -46,8 +141,14 @@ struct Handler {
 
 impl Handler {
     async fn dispatch(&self, envelope: EventEnvelope) {
+        let event_name = envelope.event_name.clone();
+        observe_received_event(&event_name);
+        let started = Instant::now();
         if let Err(error) = self.pipeline.publish(envelope).await {
+            observe_dispatch(&event_name, "failure", started.elapsed().as_secs_f64());
             error!(?error, "failed to persist and enqueue event");
+        } else {
+            observe_dispatch(&event_name, "success", started.elapsed().as_secs_f64());
         }
     }
 }
@@ -297,6 +398,15 @@ async fn main() -> Result<()> {
     let handler = Handler {
         pipeline: Arc::new(Pipeline { queue, store }),
     };
+    let metrics_addr: SocketAddr = settings
+        .gateway_metrics_bind_addr
+        .parse()
+        .context("invalid GATEWAY_METRICS_BIND_ADDR")?;
+    task::spawn(async move {
+        if let Err(error) = run_metrics_server(metrics_addr).await {
+            error!(?error, "gateway metrics server exited");
+        }
+    });
 
     let mut intents = GatewayIntents::GUILDS
         | GatewayIntents::GUILD_MESSAGES
@@ -319,6 +429,167 @@ async fn main() -> Result<()> {
 fn init_tracing(rust_log: &str) {
     let filter = EnvFilter::try_new(rust_log).unwrap_or_else(|_| EnvFilter::new("info"));
     tracing_subscriber::fmt().with_env_filter(filter).init();
+}
+
+fn gateway_metrics() -> &'static GatewayMetrics {
+    METRICS.get_or_init(|| {
+        let registry = Registry::new();
+        let event_dispatch_duration_seconds = HistogramVec::new(
+            HistogramOpts::new(
+                "gateway_event_dispatch_duration_seconds",
+                "Gateway event dispatch duration in seconds",
+            ),
+            &["event", "status"],
+        )
+        .expect("failed to create gateway dispatch histogram");
+        let event_payload_bytes = HistogramVec::new(
+            HistogramOpts::new(
+                "gateway_event_payload_bytes",
+                "Serialized gateway event payload size in bytes",
+            ),
+            &["event"],
+        )
+        .expect("failed to create gateway payload size histogram");
+        let events_published_total = IntCounterVec::new(
+            prometheus::Opts::new(
+                "gateway_events_published_total",
+                "Gateway events successfully persisted and queued",
+            ),
+            &["event"],
+        )
+        .expect("failed to create gateway published counter");
+        let events_received_total = IntCounterVec::new(
+            prometheus::Opts::new(
+                "gateway_events_received_total",
+                "Gateway events received by the handler",
+            ),
+            &["event"],
+        )
+        .expect("failed to create gateway received counter");
+        let pipeline_stage_duration_seconds = HistogramVec::new(
+            HistogramOpts::new(
+                "gateway_pipeline_stage_duration_seconds",
+                "Gateway pipeline stage duration in seconds",
+            ),
+            &["event", "stage", "status"],
+        )
+        .expect("failed to create gateway pipeline stage histogram");
+        let publish_failures_total = IntCounterVec::new(
+            prometheus::Opts::new(
+                "gateway_publish_failures_total",
+                "Gateway publish failures grouped by event and stage",
+            ),
+            &["event", "stage"],
+        )
+        .expect("failed to create gateway failure counter");
+
+        registry
+            .register(Box::new(event_dispatch_duration_seconds.clone()))
+            .expect("failed to register gateway dispatch histogram");
+        registry
+            .register(Box::new(event_payload_bytes.clone()))
+            .expect("failed to register gateway payload histogram");
+        registry
+            .register(Box::new(events_published_total.clone()))
+            .expect("failed to register gateway published counter");
+        registry
+            .register(Box::new(events_received_total.clone()))
+            .expect("failed to register gateway received counter");
+        registry
+            .register(Box::new(pipeline_stage_duration_seconds.clone()))
+            .expect("failed to register gateway pipeline stage histogram");
+        registry
+            .register(Box::new(publish_failures_total.clone()))
+            .expect("failed to register gateway failure counter");
+
+        GatewayMetrics {
+            event_dispatch_duration_seconds,
+            event_payload_bytes,
+            events_published_total,
+            events_received_total,
+            pipeline_stage_duration_seconds,
+            publish_failures_total,
+            registry,
+        }
+    })
+}
+
+async fn run_metrics_server(addr: SocketAddr) -> Result<()> {
+    let app = Router::new()
+        .route("/metrics", get(metrics))
+        .route("/readyz", get(|| async { "ok" }))
+        .with_state(gateway_metrics());
+
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("failed to bind gateway metrics listener to {addr}"))?;
+    info!(address = %addr, "gateway metrics listening");
+    axum::serve(listener, app)
+        .await
+        .context("gateway metrics server crashed")
+}
+
+async fn metrics(State(metrics): State<&'static GatewayMetrics>) -> impl IntoResponse {
+    let mut encoded = Vec::new();
+    let encoder = TextEncoder::new();
+    let metric_families = metrics.registry.gather();
+    match encoder.encode(&metric_families, &mut encoded) {
+        Ok(_) => (
+            [(
+                axum::http::header::CONTENT_TYPE,
+                encoder.format_type().to_string(),
+            )],
+            encoded,
+        )
+            .into_response(),
+        Err(error) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to encode metrics: {error}"),
+        )
+            .into_response(),
+    }
+}
+
+fn observe_dispatch(event_name: &str, status: &str, duration_seconds: f64) {
+    gateway_metrics()
+        .event_dispatch_duration_seconds
+        .with_label_values(&[event_name, status])
+        .observe(duration_seconds);
+}
+
+fn observe_payload_size(event_name: &str, payload_bytes: usize) {
+    gateway_metrics()
+        .event_payload_bytes
+        .with_label_values(&[event_name])
+        .observe(payload_bytes as f64);
+}
+
+fn observe_received_event(event_name: &str) {
+    gateway_metrics()
+        .events_received_total
+        .with_label_values(&[event_name])
+        .inc();
+}
+
+fn observe_published_event(event_name: &str) {
+    gateway_metrics()
+        .events_published_total
+        .with_label_values(&[event_name])
+        .inc();
+}
+
+fn observe_pipeline_stage(event_name: &str, stage: &str, status: &str, duration_seconds: f64) {
+    gateway_metrics()
+        .pipeline_stage_duration_seconds
+        .with_label_values(&[event_name, stage, status])
+        .observe(duration_seconds);
+}
+
+fn observe_publish_failure(event_name: &str, stage: &str) {
+    gateway_metrics()
+        .publish_failures_total
+        .with_label_values(&[event_name, stage])
+        .inc();
 }
 
 fn timestamp_to_chrono(timestamp: &serenity::model::Timestamp) -> DateTime<Utc> {

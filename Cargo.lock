@@ -46,7 +46,9 @@ dependencies = [
  "axum",
  "chrono",
  "common",
+ "futures-util",
  "prometheus",
+ "redis",
  "reqwest",
  "serde",
  "serde_json",
@@ -597,8 +599,10 @@ name = "gateway"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "chrono",
  "common",
+ "prometheus",
  "serde_json",
  "serenity",
  "sqlx",
@@ -971,6 +975,21 @@ dependencies = [
  "hashbrown 0.16.1",
  "serde",
  "serde_core",
+]
+
+[[package]]
+name = "intake-lab"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "prometheus",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
