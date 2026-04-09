@@ -2,7 +2,7 @@
 
 import { usePathname } from "next/navigation";
 import Link from "next/link";
-import { LayoutDashboard, Users, Flame } from "lucide-react";
+import { LayoutDashboard, Users, Flame, Bot } from "lucide-react";
 
 export function DashboardNav({ guildId }: { guildId?: string }) {
   const pathname = usePathname();
@@ -30,6 +30,12 @@ export function DashboardNav({ guildId }: { guildId?: string }) {
       label: "Users",
       icon: Users,
       active: pathname === "/dashboard/users",
+    },
+    {
+      href: "/dashboard/ai",
+      label: "AI",
+      icon: Bot,
+      active: pathname === "/dashboard/ai",
     },
   ];
 

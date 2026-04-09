@@ -20,6 +20,8 @@ pub struct Settings {
     pub worker_backfill_channel_concurrency: usize,
     pub worker_metrics_bind_addr: String,
     pub worker_consumer_prefix: String,
+    pub openrouter_api_key: Option<String>,
+    pub discord_enable_message_content_intent: bool,
     pub rust_log: String,
 }
 
@@ -61,6 +63,12 @@ impl Settings {
                 .unwrap_or_else(|_| "127.0.0.1:9091".to_string()),
             worker_consumer_prefix: env::var("WORKER_CONSUMER_PREFIX")
                 .unwrap_or_else(|_| "guildest-worker".to_string()),
+            openrouter_api_key: env::var("OPENROUTER_API_KEY").ok(),
+            discord_enable_message_content_intent: env::var(
+                "DISCORD_ENABLE_MESSAGE_CONTENT_INTENT",
+            )
+            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+            .unwrap_or(false),
             rust_log: env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
         })
     }

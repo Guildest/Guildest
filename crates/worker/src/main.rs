@@ -13,9 +13,10 @@ use axum::{
 };
 use chrono::{DateTime, Days, NaiveDate, Utc};
 use common::{
+    ai::{AiObservationClassification, AiStore, PostgresAiStore},
     config::Settings,
     events::{EventEnvelope, EventPayload},
-    jobs::{BACKFILL_STREAM, BackfillJob},
+    jobs::{AI_CLASSIFY_STREAM, BACKFILL_STREAM, AiClassifyJob, BackfillJob},
     queue::{EventQueue, QueueDelivery, QueuedEventRef, RedisEventQueue},
     store::{PostgresRawEventStore, RawEventStore},
 };
@@ -33,12 +34,14 @@ use tracing_subscriber::EnvFilter;
 
 #[derive(Clone)]
 struct WorkerContext {
+    ai_store: PostgresAiStore,
     backfill_channel_concurrency: usize,
     backfill_page_delay: Duration,
     discord_api_base_url: String,
     discord_http: Client,
     discord_limiter: Arc<DiscordRequestLimiter>,
     discord_token: String,
+    openrouter_api_key: Option<String>,
     pool: PgPool,
     queue: RedisEventQueue,
     store: PostgresRawEventStore,
@@ -323,6 +326,9 @@ async fn main() -> Result<()> {
 
     ensure_analytics_schema(&pool).await?;
 
+    let ai_store = PostgresAiStore::new(pool.clone());
+    ai_store.ensure_schema().await?;
+
     let queue = RedisEventQueue::new(&settings.redis_url)?;
     let store = PostgresRawEventStore::new(pool.clone());
     for stream in stream_names() {
@@ -330,6 +336,7 @@ async fn main() -> Result<()> {
     }
 
     let ctx = Arc::new(WorkerContext {
+        ai_store,
         backfill_channel_concurrency: settings.worker_backfill_channel_concurrency.max(1),
         backfill_page_delay: Duration::from_millis(settings.worker_backfill_page_delay_ms),
         discord_api_base_url: settings.discord_api_base_url.clone(),
@@ -338,6 +345,7 @@ async fn main() -> Result<()> {
             settings.worker_backfill_channel_concurrency.max(1),
         )),
         discord_token: settings.discord_token,
+        openrouter_api_key: settings.openrouter_api_key,
         pool,
         queue,
         store,
@@ -457,6 +465,13 @@ async fn process_delivery(ctx: &WorkerContext, delivery: &QueueDelivery) -> Resu
         let job: BackfillJob =
             serde_json::from_str(&delivery.payload).context("failed to decode backfill job")?;
         process_backfill_job(ctx, &job).await?;
+        return Ok(());
+    }
+
+    if delivery.stream == AI_CLASSIFY_STREAM {
+        let job: AiClassifyJob =
+            serde_json::from_str(&delivery.payload).context("failed to decode ai classify job")?;
+        process_ai_classify_job(ctx, &job).await?;
         return Ok(());
     }
 
@@ -5337,13 +5352,130 @@ fn is_message_backfillable_channel(channel: &DiscordChannel) -> bool {
     matches!(channel.kind, 0 | 5 | 10 | 11 | 12)
 }
 
-fn stream_names() -> [&'static str; 5] {
+async fn process_ai_classify_job(ctx: &WorkerContext, job: &AiClassifyJob) -> Result<()> {
+    let Some(api_key) = &ctx.openrouter_api_key else {
+        return Ok(());
+    };
+
+    let Some(obs) = ctx.ai_store.get_observation(job.observation_id).await? else {
+        return Ok(());
+    };
+
+    let Some(content) = &obs.content_redacted else {
+        return Ok(());
+    };
+
+    let classification = call_openrouter_classify(api_key, content, &ctx.discord_http).await?;
+    ctx.ai_store
+        .update_observation_classification(obs.id, &classification)
+        .await?;
+
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenRouterResponse {
+    choices: Vec<OpenRouterChoice>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenRouterChoice {
+    message: OpenRouterMessage,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenRouterMessage {
+    content: String,
+}
+
+/// Calls OpenRouter with a cheap classification model and returns structured output.
+async fn call_openrouter_classify(
+    api_key: &str,
+    content: &str,
+    http: &Client,
+) -> Result<AiObservationClassification> {
+    let prompt = format!(
+        r#"Classify this Discord message for a community intelligence system.
+
+Message: {content}
+
+Respond with JSON only, no other text:
+{{
+  "is_question": <bool>,
+  "is_feedback": <bool>,
+  "is_support_request": <bool>,
+  "sentiment": "positive" | "negative" | "neutral",
+  "urgency": "low" | "normal" | "high",
+  "category": "bug" | "feature_request" | "pricing_objection" | "onboarding_confusion" | "support_issue" | "churn_risk" | "praise" | "moderation_risk" | "community_health" | null
+}}"#
+    );
+
+    let body = serde_json::json!({
+        "model": "google/gemini-flash-1.5-8b",
+        "messages": [{"role": "user", "content": prompt}],
+        "response_format": {"type": "json_object"},
+        "max_tokens": 200
+    });
+
+    let resp = http
+        .post("https://openrouter.ai/api/v1/chat/completions")
+        .bearer_auth(api_key)
+        .header("HTTP-Referer", "https://guildest.site")
+        .json(&body)
+        .send()
+        .await
+        .context("openrouter request failed")?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        return Err(anyhow::anyhow!("openrouter returned {status}: {text}"));
+    }
+
+    let or_resp: OpenRouterResponse = resp
+        .json()
+        .await
+        .context("failed to decode openrouter response")?;
+
+    let raw = or_resp
+        .choices
+        .into_iter()
+        .next()
+        .context("openrouter returned no choices")?
+        .message
+        .content;
+
+    #[derive(Deserialize)]
+    struct ClassifyOutput {
+        is_question: Option<bool>,
+        is_feedback: Option<bool>,
+        is_support_request: Option<bool>,
+        sentiment: Option<String>,
+        urgency: Option<String>,
+        category: Option<String>,
+    }
+
+    let out: ClassifyOutput = serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse classify output: {raw}"))?;
+
+    Ok(AiObservationClassification {
+        is_question: out.is_question.unwrap_or(false),
+        is_feedback: out.is_feedback.unwrap_or(false),
+        is_support_request: out.is_support_request.unwrap_or(false),
+        sentiment: out.sentiment.unwrap_or_else(|| "neutral".to_string()),
+        urgency: out.urgency.unwrap_or_else(|| "normal".to_string()),
+        category: out.category,
+    })
+}
+
+fn stream_names() -> [&'static str; 6] {
     [
         "events.guild",
         "events.member",
         "events.message",
         "events.voice",
         BACKFILL_STREAM,
+        AI_CLASSIFY_STREAM,
     ]
 }
 

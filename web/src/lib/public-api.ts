@@ -79,6 +79,35 @@ export type GuildHealthSummary = {
   mau: number;
 };
 
+export type AiGuildSettings = {
+  guild_id: string;
+  ai_enabled: boolean;
+  advisor_mode_enabled: boolean;
+  approval_required: boolean;
+  owner_dm_enabled: boolean;
+  live_pulse_enabled: boolean;
+  live_pulse_interval_minutes: number;
+  real_time_alerts_enabled: boolean;
+  daily_briefing_enabled: boolean;
+  weekly_report_enabled: boolean;
+  retention_days: number;
+};
+
+export type AiLivePulse = {
+  window_start: string;
+  window_end: string;
+  window_minutes: number;
+  total_observations: number;
+  classified_count: number;
+  question_count: number;
+  feedback_count: number;
+  support_count: number;
+  positive_sentiment_count: number;
+  negative_sentiment_count: number;
+  neutral_sentiment_count: number;
+  high_urgency_count: number;
+};
+
 export type GuildRetentionCohorts = {
   cohorts: Array<{
     cohort_age_days: number;
@@ -529,6 +558,73 @@ export async function getGuildPipelineDiscardHistory(
     }
 
     return (await response.json()) as GuildPipelineDiscardHistory;
+  } catch {
+    return null;
+  }
+}
+
+export async function getAiSettings(
+  guildId: string,
+  cookieHeader?: string,
+): Promise<AiGuildSettings | null> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/v1/dashboard/guilds/${guildId}/ai/settings`,
+      {
+        cache: "no-store",
+        headers: cookieHeader ? { Cookie: cookieHeader } : undefined,
+      },
+    );
+    if (response.status === 401 || response.status === 403) return null;
+    if (!response.ok) throw new Error(`ai settings request failed: ${response.status}`);
+    return (await response.json()) as AiGuildSettings;
+  } catch {
+    return null;
+  }
+}
+
+export async function updateAiSettings(
+  guildId: string,
+  update: Partial<AiGuildSettings>,
+  cookieHeader?: string,
+): Promise<AiGuildSettings | null> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/v1/dashboard/guilds/${guildId}/ai/settings`,
+      {
+        method: "PUT",
+        cache: "no-store",
+        headers: {
+          "Content-Type": "application/json",
+          ...(cookieHeader ? { Cookie: cookieHeader } : {}),
+        },
+        body: JSON.stringify(update),
+      },
+    );
+    if (!response.ok) throw new Error(`ai settings update failed: ${response.status}`);
+    return (await response.json()) as AiGuildSettings;
+  } catch {
+    return null;
+  }
+}
+
+export async function getAiLivePulse(
+  guildId: string,
+  windowMinutes?: number,
+  cookieHeader?: string,
+): Promise<AiLivePulse | null> {
+  try {
+    const params = windowMinutes ? `?window_minutes=${windowMinutes}` : "";
+    const response = await fetch(
+      `${getApiBaseUrl()}/v1/dashboard/guilds/${guildId}/ai/live-pulse${params}`,
+      {
+        cache: "no-store",
+        headers: cookieHeader ? { Cookie: cookieHeader } : undefined,
+      },
+    );
+    if (response.status === 401 || response.status === 403) return null;
+    if (!response.ok) throw new Error(`ai live pulse request failed: ${response.status}`);
+    return (await response.json()) as AiLivePulse;
   } catch {
     return null;
   }

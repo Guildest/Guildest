@@ -19,6 +19,7 @@ use axum::{
 };
 use chrono::{Days, Utc};
 use common::{
+    ai::{AiStore, LivePulseResponse, PostgresAiStore, UpdateAiGuildSettings},
     config::Settings,
     jobs::{BACKFILL_STREAM, BackfillJob},
     queue::{
@@ -51,6 +52,7 @@ const DEAD_LETTER_ACTION_LOCK_TTL_SECONDS: u64 = 30;
 
 #[derive(Clone)]
 struct AppState {
+    ai_store: PostgresAiStore,
     http_client: Client,
     metrics: &'static ApiMetrics,
     pool: PgPool,
@@ -599,6 +601,8 @@ async fn main() -> Result<()> {
     PostgresRawEventStore::new(pool.clone())
         .ensure_schema()
         .await?;
+    let ai_store = PostgresAiStore::new(pool.clone());
+    ai_store.ensure_schema().await?;
     ensure_public_schema(&pool).await?;
     let queue = RedisEventQueue::new(&settings.redis_url)?;
     let initial_public_stats = load_public_stats_snapshot(&pool, &queue)
@@ -607,6 +611,7 @@ async fn main() -> Result<()> {
     let (public_stats_cache, _) = watch::channel(initial_public_stats);
 
     let state = Arc::new(AppState {
+        ai_store,
         http_client: Client::new(),
         metrics: api_metrics(),
         pool,
@@ -678,6 +683,14 @@ async fn main() -> Result<()> {
         .route(
             "/v1/dashboard/guilds/{guild_id}/backfill",
             post(request_guild_backfill),
+        )
+        .route(
+            "/v1/dashboard/guilds/{guild_id}/ai/settings",
+            get(dashboard_ai_settings).put(dashboard_ai_settings_update),
+        )
+        .route(
+            "/v1/dashboard/guilds/{guild_id}/ai/live-pulse",
+            get(dashboard_ai_live_pulse),
         )
         .with_state(state)
         .layer(cors);
@@ -4850,6 +4863,78 @@ fn public_url(settings: &Settings, path: &str) -> String {
         settings.public_api_base_url.trim_end_matches('/'),
         path
     )
+}
+
+async fn dashboard_ai_settings(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(guild_id): Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let session_id = read_session_id(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
+    ensure_guild_access(&state.pool, session_id, &guild_id).await?;
+
+    match state.ai_store.get_guild_settings(&guild_id).await {
+        Ok(Some(settings)) => Ok(Json(serde_json::to_value(settings).unwrap_or_default())),
+        Ok(None) => {
+            // Return defaults — no row yet means AI is off with default config.
+            let defaults = serde_json::json!({
+                "guild_id": guild_id,
+                "ai_enabled": false,
+                "advisor_mode_enabled": true,
+                "approval_required": true,
+                "owner_dm_enabled": false,
+                "live_pulse_enabled": true,
+                "live_pulse_interval_minutes": 60,
+                "real_time_alerts_enabled": true,
+                "daily_briefing_enabled": true,
+                "weekly_report_enabled": true,
+                "retention_days": 30
+            });
+            Ok(Json(defaults))
+        }
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn dashboard_ai_settings_update(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(guild_id): Path<String>,
+    Json(update): Json<UpdateAiGuildSettings>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let session_id = read_session_id(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
+    ensure_guild_access(&state.pool, session_id, &guild_id).await?;
+
+    match state.ai_store.upsert_guild_settings(&guild_id, &update).await {
+        Ok(settings) => Ok(Json(serde_json::to_value(settings).unwrap_or_default())),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct LivePulseQuery {
+    window_minutes: Option<i32>,
+}
+
+async fn dashboard_ai_live_pulse(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(guild_id): Path<String>,
+    Query(query): Query<LivePulseQuery>,
+) -> Result<Json<LivePulseResponse>, StatusCode> {
+    let session_id = read_session_id(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
+    ensure_guild_access(&state.pool, session_id, &guild_id).await?;
+
+    let window_minutes = query.window_minutes.unwrap_or(60).clamp(10, 1440);
+
+    match state
+        .ai_store
+        .live_pulse_stats(&guild_id, window_minutes)
+        .await
+    {
+        Ok(stats) => Ok(Json(stats)),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
 }
 
 fn read_session_id(headers: &HeaderMap) -> Option<Uuid> {
