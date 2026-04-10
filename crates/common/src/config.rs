@@ -21,6 +21,8 @@ pub struct Settings {
     pub worker_metrics_bind_addr: String,
     pub worker_consumer_prefix: String,
     pub openrouter_api_key: Option<String>,
+    pub ai_classify_model: String,
+    pub ai_synthesis_model: String,
     pub discord_enable_message_content_intent: bool,
     pub rust_log: String,
 }
@@ -64,6 +66,10 @@ impl Settings {
             worker_consumer_prefix: env::var("WORKER_CONSUMER_PREFIX")
                 .unwrap_or_else(|_| "guildest-worker".to_string()),
             openrouter_api_key: env::var("OPENROUTER_API_KEY").ok(),
+            ai_classify_model: env::var("AI_CLASSIFY_MODEL")
+                .unwrap_or_else(|_| "stepfun/step-3.5-flash".to_string()),
+            ai_synthesis_model: env::var("AI_SYNTHESIS_MODEL")
+                .unwrap_or_else(|_| "minimax/minimax-m2.7".to_string()),
             discord_enable_message_content_intent: env::var(
                 "DISCORD_ENABLE_MESSAGE_CONTENT_INTENT",
             )

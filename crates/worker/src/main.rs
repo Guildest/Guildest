@@ -42,6 +42,7 @@ struct WorkerContext {
     discord_limiter: Arc<DiscordRequestLimiter>,
     discord_token: String,
     openrouter_api_key: Option<String>,
+    openrouter_classify_model: String,
     pool: PgPool,
     queue: RedisEventQueue,
     store: PostgresRawEventStore,
@@ -346,6 +347,7 @@ async fn main() -> Result<()> {
         )),
         discord_token: settings.discord_token,
         openrouter_api_key: settings.openrouter_api_key,
+        openrouter_classify_model: settings.ai_classify_model,
         pool,
         queue,
         store,
@@ -5365,7 +5367,8 @@ async fn process_ai_classify_job(ctx: &WorkerContext, job: &AiClassifyJob) -> Re
         return Ok(());
     };
 
-    let classification = call_openrouter_classify(api_key, content, &ctx.discord_http).await?;
+    let classification =
+        call_openrouter_classify(api_key, &ctx.openrouter_classify_model, content, &ctx.discord_http).await?;
     ctx.ai_store
         .update_observation_classification(obs.id, &classification)
         .await?;
@@ -5391,6 +5394,7 @@ struct OpenRouterMessage {
 /// Calls OpenRouter with a cheap classification model and returns structured output.
 async fn call_openrouter_classify(
     api_key: &str,
+    model: &str,
     content: &str,
     http: &Client,
 ) -> Result<AiObservationClassification> {
@@ -5411,7 +5415,7 @@ Respond with JSON only, no other text:
     );
 
     let body = serde_json::json!({
-        "model": "google/gemini-flash-1.5-8b",
+        "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "response_format": {"type": "json_object"},
         "max_tokens": 200
