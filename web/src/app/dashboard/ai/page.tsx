@@ -121,24 +121,6 @@ function LivePulsePanel({ pulse }: { pulse: AiLivePulse }) {
   );
 }
 
-function AiOffPanel({ guildId }: { guildId: string }) {
-  return (
-    <div className="rounded-2xl border border-border bg-surface p-8 text-center space-y-3">
-      <p className="text-sm font-semibold text-cream">AI is off for this server</p>
-      <p className="text-xs text-cream/50 max-w-sm mx-auto">
-        Enable AI in Settings below to start capturing and classifying community activity. Content
-        capture is disabled by default — you control which channels are monitored.
-      </p>
-      <a
-        href={`/dashboard/ai?guild_id=${guildId}#settings`}
-        className="inline-block mt-2 rounded-xl bg-tan/15 px-4 py-2 text-xs font-medium text-tan hover:bg-tan/25 transition-colors"
-      >
-        Go to Settings
-      </a>
-    </div>
-  );
-}
-
 function SettingsPanel({
   settings,
   guildId,
@@ -147,11 +129,6 @@ function SettingsPanel({
   guildId: string;
 }) {
   const rows: { label: string; desc: string; key: keyof AiGuildSettings }[] = [
-    {
-      label: "AI enabled",
-      desc: "Master switch. Turns on observation, classification, and analysis for this server.",
-      key: "ai_enabled",
-    },
     {
       label: "Real-time alerts",
       desc: "Alert when multiple users hit the same issue or a high-urgency signal appears.",
@@ -255,15 +232,11 @@ export default async function AiDashboardPage({ searchParams }: AiPageProps) {
               </div>
             )}
 
-            {selectedGuildId && settings && !settings.ai_enabled && (
-              <AiOffPanel guildId={selectedGuildId} />
-            )}
-
-            {selectedGuildId && settings?.ai_enabled && pulse && (
+            {selectedGuildId && pulse && (
               <LivePulsePanel pulse={pulse} />
             )}
 
-            {selectedGuildId && settings?.ai_enabled && !pulse && (
+            {selectedGuildId && settings && !pulse && (
               <div className="rounded-2xl border border-border bg-surface p-6 text-center text-sm text-cream/50">
                 No observations yet. Activity will appear here once messages are captured and
                 classified.

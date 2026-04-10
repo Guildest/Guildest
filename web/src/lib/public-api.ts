@@ -81,7 +81,6 @@ export type GuildHealthSummary = {
 
 export type AiGuildSettings = {
   guild_id: string;
-  ai_enabled: boolean;
   advisor_mode_enabled: boolean;
   approval_required: boolean;
   owner_dm_enabled: boolean;

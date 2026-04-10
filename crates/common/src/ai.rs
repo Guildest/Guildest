@@ -9,7 +9,6 @@ use sqlx::{FromRow, PgPool};
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct AiGuildSettings {
     pub guild_id: String,
-    pub ai_enabled: bool,
     pub advisor_mode_enabled: bool,
     pub approval_required: bool,
     pub owner_dm_enabled: bool,
@@ -25,7 +24,6 @@ pub struct AiGuildSettings {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UpdateAiGuildSettings {
-    pub ai_enabled: Option<bool>,
     pub advisor_mode_enabled: Option<bool>,
     pub approval_required: Option<bool>,
     pub owner_dm_enabled: Option<bool>,
@@ -148,7 +146,6 @@ impl AiStore for PostgresAiStore {
             r#"
             CREATE TABLE IF NOT EXISTS ai_guild_settings (
                 guild_id TEXT PRIMARY KEY,
-                ai_enabled BOOLEAN NOT NULL DEFAULT FALSE,
                 advisor_mode_enabled BOOLEAN NOT NULL DEFAULT TRUE,
                 approval_required BOOLEAN NOT NULL DEFAULT TRUE,
                 owner_dm_enabled BOOLEAN NOT NULL DEFAULT FALSE,
@@ -166,6 +163,14 @@ impl AiStore for PostgresAiStore {
         .execute(&self.pool)
         .await
         .context("failed to create ai_guild_settings table")?;
+
+        // Drop legacy ai_enabled column if it exists from a previous schema version.
+        sqlx::query(
+            "ALTER TABLE ai_guild_settings DROP COLUMN IF EXISTS ai_enabled",
+        )
+        .execute(&self.pool)
+        .await
+        .context("failed to drop legacy ai_enabled column")?;
 
         sqlx::query(
             r#"
@@ -264,21 +269,19 @@ impl AiStore for PostgresAiStore {
         sqlx::query(
             r#"
             UPDATE ai_guild_settings SET
-                ai_enabled                 = COALESCE($1, ai_enabled),
-                advisor_mode_enabled       = COALESCE($2, advisor_mode_enabled),
-                approval_required          = COALESCE($3, approval_required),
-                owner_dm_enabled           = COALESCE($4, owner_dm_enabled),
-                live_pulse_enabled         = COALESCE($5, live_pulse_enabled),
-                live_pulse_interval_minutes = COALESCE($6, live_pulse_interval_minutes),
-                real_time_alerts_enabled   = COALESCE($7, real_time_alerts_enabled),
-                daily_briefing_enabled     = COALESCE($8, daily_briefing_enabled),
-                weekly_report_enabled      = COALESCE($9, weekly_report_enabled),
-                retention_days             = COALESCE($10, retention_days),
-                updated_at                 = NOW()
-            WHERE guild_id = $11
+                advisor_mode_enabled        = COALESCE($1, advisor_mode_enabled),
+                approval_required           = COALESCE($2, approval_required),
+                owner_dm_enabled            = COALESCE($3, owner_dm_enabled),
+                live_pulse_enabled          = COALESCE($4, live_pulse_enabled),
+                live_pulse_interval_minutes = COALESCE($5, live_pulse_interval_minutes),
+                real_time_alerts_enabled    = COALESCE($6, real_time_alerts_enabled),
+                daily_briefing_enabled      = COALESCE($7, daily_briefing_enabled),
+                weekly_report_enabled       = COALESCE($8, weekly_report_enabled),
+                retention_days              = COALESCE($9, retention_days),
+                updated_at                  = NOW()
+            WHERE guild_id = $10
             "#,
         )
-        .bind(update.ai_enabled)
         .bind(update.advisor_mode_enabled)
         .bind(update.approval_required)
         .bind(update.owner_dm_enabled)
@@ -310,7 +313,6 @@ impl AiStore for PostgresAiStore {
             JOIN ai_channel_settings c
               ON c.guild_id = g.guild_id AND c.channel_id = $2
             WHERE g.guild_id = $1
-              AND g.ai_enabled = TRUE
               AND c.content_analysis_enabled = TRUE
               AND c.monitoring_enabled = TRUE
             "#,

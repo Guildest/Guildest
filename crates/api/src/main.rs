@@ -4879,7 +4879,6 @@ async fn dashboard_ai_settings(
             // Return defaults — no row yet means AI is off with default config.
             let defaults = serde_json::json!({
                 "guild_id": guild_id,
-                "ai_enabled": false,
                 "advisor_mode_enabled": true,
                 "approval_required": true,
                 "owner_dm_enabled": false,
