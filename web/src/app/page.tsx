@@ -26,24 +26,23 @@ function Heatmap({ days }: { days: Array<{ date: string; message_count: number }
   }
 
   return (
-    <div className="overflow-x-auto">
-      <div
-        style={{
-          display: "grid",
-          gridTemplateRows: "repeat(7, 10px)",
-          gridAutoFlow: "column",
-          gridAutoColumns: "10px",
-          gap: "3px",
-        }}
-      >
-        {cells.map((d, i) => (
-          <div
-            key={i}
-            className={`rounded-sm ${cellColor(d.message_count)}`}
-            title={d.date ? `${d.date}: ${d.message_count}` : undefined}
-          />
-        ))}
-      </div>
+    <div
+      className="w-full"
+      style={{
+        display: "grid",
+        gridTemplateRows: "repeat(7, 10px)",
+        gridAutoFlow: "column",
+        gridAutoColumns: "1fr",
+        gap: "2px",
+      }}
+    >
+      {cells.map((d, i) => (
+        <div
+          key={i}
+          className={`rounded-[2px] ${cellColor(d.message_count)}`}
+          title={d.date ? `${d.date}: ${d.message_count}` : undefined}
+        />
+      ))}
     </div>
   );
 }
@@ -98,9 +97,9 @@ export default async function Home() {
       </section>
 
       {/* Heatmap */}
-      <section className="px-8 pb-20">
+      <section className="pb-20">
         <Heatmap days={heatmap.days} />
-        <div className="mt-2 flex justify-between text-[10px] text-cream/25">
+        <div className="mt-2 px-2 flex justify-between text-[10px] text-cream/25">
           <span>{heatmap.days[0]?.date ?? ""}</span>
           <span>{heatmap.total_messages.toLocaleString()} messages tracked</span>
           <span>{heatmap.days[heatmap.days.length - 1]?.date ?? ""}</span>
