@@ -3,16 +3,21 @@ import Image from "next/image";
 import { getDashboardMe, getPublicLinks, getPublicMessageHeatmap } from "@/lib/public-api";
 
 function Heatmap({ days }: { days: Array<{ date: string; message_count: number }> }) {
-  // Always render 365 cells — fill with zeros if API returned nothing
-  const cells: Array<{ date: string; message_count: number }> =
+  const base: Array<{ date: string; message_count: number }> =
     days.length > 0
       ? days
       : Array.from({ length: 365 }, (_, i) => ({ date: String(i), message_count: 0 }));
 
+  // Pad to a full number of weeks (multiples of 7)
+  const cells = [...base];
+  while (cells.length % 7 !== 0) cells.push({ date: "", message_count: -1 });
+  const weeks = cells.length / 7;
+
   const max = Math.max(...cells.map((d) => d.message_count), 1);
 
   function cellColor(count: number) {
-    if (count === 0) return "bg-white/[0.07]";
+    if (count < 0) return "opacity-0";
+    if (count === 0) return "bg-white/[0.08]";
     const level = Math.ceil((count / max) * 4);
     if (level >= 4) return "bg-tan";
     if (level === 3) return "bg-tan/70";
@@ -21,12 +26,22 @@ function Heatmap({ days }: { days: Array<{ date: string; message_count: number }
   }
 
   return (
-    <div className="flex gap-[3px] w-full">
+    <div
+      className="w-full"
+      style={{
+        display: "grid",
+        gridTemplateRows: "repeat(7, 1fr)",
+        gridAutoFlow: "column",
+        gridAutoColumns: "1fr",
+        gap: "3px",
+        aspectRatio: `${weeks} / 7`,
+      }}
+    >
       {cells.map((d, i) => (
         <div
-          key={d.date || i}
-          className={`flex-1 h-8 rounded-sm min-w-0 ${cellColor(d.message_count)}`}
-          title={`${d.date}: ${d.message_count} messages`}
+          key={i}
+          className={`rounded-sm ${cellColor(d.message_count)}`}
+          title={d.date ? `${d.date}: ${d.message_count}` : undefined}
         />
       ))}
     </div>
