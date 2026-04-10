@@ -26,24 +26,24 @@ function Heatmap({ days }: { days: Array<{ date: string; message_count: number }
   }
 
   return (
-    <div
-      className="w-full"
-      style={{
-        display: "grid",
-        gridTemplateRows: "repeat(7, 1fr)",
-        gridAutoFlow: "column",
-        gridAutoColumns: "1fr",
-        gap: "3px",
-        aspectRatio: `${weeks} / 7`,
-      }}
-    >
-      {cells.map((d, i) => (
-        <div
-          key={i}
-          className={`rounded-sm ${cellColor(d.message_count)}`}
-          title={d.date ? `${d.date}: ${d.message_count}` : undefined}
-        />
-      ))}
+    <div className="overflow-x-auto">
+      <div
+        style={{
+          display: "grid",
+          gridTemplateRows: "repeat(7, 10px)",
+          gridAutoFlow: "column",
+          gridAutoColumns: "10px",
+          gap: "3px",
+        }}
+      >
+        {cells.map((d, i) => (
+          <div
+            key={i}
+            className={`rounded-sm ${cellColor(d.message_count)}`}
+            title={d.date ? `${d.date}: ${d.message_count}` : undefined}
+          />
+        ))}
+      </div>
     </div>
   );
 }
