@@ -3,8 +3,10 @@ import { DashboardNav } from "@/components/dashboard-nav";
 import { GuildSidebar } from "@/components/guild-sidebar";
 import {
   getDashboardMe,
+  getAiSettings,
   getAiLivePulse,
   getPublicLinks,
+  type AiGuildSettings,
   type AiLivePulse,
 } from "@/lib/public-api";
 
@@ -119,6 +121,72 @@ function LivePulsePanel({ pulse }: { pulse: AiLivePulse }) {
   );
 }
 
+function SettingsPanel({
+  settings,
+  guildId,
+}: {
+  settings: AiGuildSettings;
+  guildId: string;
+}) {
+  const rows: { label: string; desc: string; key: keyof AiGuildSettings }[] = [
+    {
+      label: "Real-time alerts",
+      desc: "Alert when multiple users hit the same issue or a high-urgency signal appears.",
+      key: "real_time_alerts_enabled",
+    },
+    {
+      label: "Daily briefing",
+      desc: "Operational digest delivered once per day.",
+      key: "daily_briefing_enabled",
+    },
+    {
+      label: "Weekly report",
+      desc: "Strategic trends report delivered once per week.",
+      key: "weekly_report_enabled",
+    },
+    {
+      label: "Owner DM",
+      desc: "Deliver briefings and alerts via Discord DM to the server owner.",
+      key: "owner_dm_enabled",
+    },
+  ];
+
+  return (
+    <div id="settings" className="rounded-2xl border border-border bg-surface p-6 space-y-1">
+      <h2 className="text-sm font-semibold text-cream mb-4">Settings</h2>
+      <form
+        method="POST"
+        action={`/api/dashboard/guilds/${guildId}/ai/settings`}
+        className="space-y-0"
+      >
+        {rows.map(({ label, desc, key }) => (
+          <div
+            key={key}
+            className="flex items-start justify-between gap-4 rounded-xl px-1 py-3 border-b border-border/50 last:border-0"
+          >
+            <div>
+              <p className="text-sm text-cream font-medium">{label}</p>
+              <p className="text-xs text-cream/40 mt-0.5">{desc}</p>
+            </div>
+            <div
+              className={`mt-0.5 h-5 w-9 shrink-0 rounded-full transition-colors ${
+                settings[key] ? "bg-tan" : "bg-surface-light"
+              }`}
+              title={settings[key] ? "On" : "Off"}
+            />
+          </div>
+        ))}
+
+        <div className="pt-4">
+          <p className="text-xs text-cream/40">
+            To change settings, use the API or connect a settings form component.
+            Content capture per channel is controlled in channel settings.
+          </p>
+        </div>
+      </form>
+    </div>
+  );
+}
 
 export default async function AiDashboardPage({ searchParams }: AiPageProps) {
   const cookieStore = await cookies();
@@ -136,9 +204,12 @@ export default async function AiDashboardPage({ searchParams }: AiPageProps) {
   const selectedGuildId =
     params.guild_id ?? me?.accessible_guilds?.[0]?.guild_id ?? null;
 
-  const pulse = selectedGuildId
-    ? await getAiLivePulse(selectedGuildId, 60, cookieHeader)
-    : null;
+  const [settings, pulse] = selectedGuildId
+    ? await Promise.all([
+        getAiSettings(selectedGuildId, cookieHeader),
+        getAiLivePulse(selectedGuildId, 60, cookieHeader),
+      ])
+    : [null, null];
 
   return (
     <div className="min-h-screen bg-background text-cream">
@@ -165,11 +236,15 @@ export default async function AiDashboardPage({ searchParams }: AiPageProps) {
               <LivePulsePanel pulse={pulse} />
             )}
 
-            {selectedGuildId && !pulse && (
+            {selectedGuildId && settings && !pulse && (
               <div className="rounded-2xl border border-border bg-surface p-6 text-center text-sm text-cream/50">
                 No observations yet. Activity will appear here once messages are captured and
                 classified.
               </div>
+            )}
+
+            {selectedGuildId && settings && (
+              <SettingsPanel settings={settings} guildId={selectedGuildId} />
             )}
           </div>
         </div>

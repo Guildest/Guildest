@@ -19,7 +19,7 @@ use axum::{
 };
 use chrono::{Days, Utc};
 use common::{
-    ai::{AiStore, LivePulseResponse, PostgresAiStore},
+    ai::{AiStore, LivePulseResponse, PostgresAiStore, UpdateAiGuildSettings},
     config::Settings,
     jobs::{BACKFILL_STREAM, BackfillJob},
     queue::{
@@ -683,6 +683,10 @@ async fn main() -> Result<()> {
         .route(
             "/v1/dashboard/guilds/{guild_id}/backfill",
             post(request_guild_backfill),
+        )
+        .route(
+            "/v1/dashboard/guilds/{guild_id}/ai/settings",
+            get(dashboard_ai_settings).put(dashboard_ai_settings_update),
         )
         .route(
             "/v1/dashboard/guilds/{guild_id}/ai/live-pulse",
@@ -4861,6 +4865,50 @@ fn public_url(settings: &Settings, path: &str) -> String {
     )
 }
 
+async fn dashboard_ai_settings(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(guild_id): Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let session_id = read_session_id(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
+    ensure_guild_access(&state.pool, session_id, &guild_id).await?;
+
+    match state.ai_store.get_guild_settings(&guild_id).await {
+        Ok(Some(settings)) => Ok(Json(serde_json::to_value(settings).unwrap_or_default())),
+        Ok(None) => {
+            // Return defaults — no row yet means AI is off with default config.
+            let defaults = serde_json::json!({
+                "guild_id": guild_id,
+                "advisor_mode_enabled": true,
+                "approval_required": true,
+                "owner_dm_enabled": false,
+                "live_pulse_enabled": true,
+                "live_pulse_interval_minutes": 60,
+                "real_time_alerts_enabled": true,
+                "daily_briefing_enabled": true,
+                "weekly_report_enabled": true,
+                "retention_days": 30
+            });
+            Ok(Json(defaults))
+        }
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn dashboard_ai_settings_update(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(guild_id): Path<String>,
+    Json(update): Json<UpdateAiGuildSettings>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let session_id = read_session_id(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
+    ensure_guild_access(&state.pool, session_id, &guild_id).await?;
+
+    match state.ai_store.upsert_guild_settings(&guild_id, &update).await {
+        Ok(settings) => Ok(Json(serde_json::to_value(settings).unwrap_or_default())),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
 
 #[derive(Debug, Deserialize)]
 struct LivePulseQuery {
