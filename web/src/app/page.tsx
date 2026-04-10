@@ -15,11 +15,11 @@ function Heatmap({ days }: { days: Array<{ date: string; message_count: number }
   }
 
   return (
-    <div className="flex gap-[3px] w-full overflow-hidden">
+    <div className="flex gap-[2px] w-full">
       {days.map((d) => (
         <div
           key={d.date}
-          className={`flex-1 aspect-square rounded-[2px] min-w-0 ${cellColor(d.message_count)}`}
+          className={`flex-1 h-8 rounded-[2px] min-w-0 ${cellColor(d.message_count)}`}
           title={`${d.date}: ${d.message_count} messages`}
         />
       ))}
