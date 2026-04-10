@@ -99,11 +99,9 @@ export default async function Home() {
       {/* Heatmap */}
       <section className="pb-20">
         <Heatmap days={heatmap.days} />
-        <div className="mt-2 px-2 flex justify-between text-[10px] text-cream/25">
-          <span>{heatmap.days[0]?.date ?? ""}</span>
-          <span>{heatmap.total_messages.toLocaleString()} messages tracked</span>
-          <span>{heatmap.days[heatmap.days.length - 1]?.date ?? ""}</span>
-        </div>
+        <p className="mt-2 text-center text-[10px] text-cream/25">
+          {heatmap.total_messages.toLocaleString()} messages tracked
+        </p>
       </section>
     </div>
   );
