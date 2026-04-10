@@ -1,62 +1,25 @@
 import { cookies } from "next/headers";
 import Image from "next/image";
-import { getDashboardMe, getPublicLinks, getPublicMessageHeatmap } from "@/lib/public-api";
-
-function Heatmap({ days }: { days: Array<{ date: string; message_count: number }> }) {
-  const base: Array<{ date: string; message_count: number }> =
-    days.length > 0
-      ? days
-      : Array.from({ length: 365 }, (_, i) => ({ date: String(i), message_count: 0 }));
-
-  // Pad to a full number of weeks (multiples of 7)
-  const cells = [...base];
-  while (cells.length % 7 !== 0) cells.push({ date: "", message_count: -1 });
-  const weeks = cells.length / 7;
-
-  const max = Math.max(...cells.map((d) => d.message_count), 1);
-
-  function cellColor(count: number) {
-    if (count < 0) return "opacity-0";
-    if (count === 0) return "bg-white/[0.08]";
-    const level = Math.ceil((count / max) * 4);
-    if (level >= 4) return "bg-tan";
-    if (level === 3) return "bg-tan/70";
-    if (level === 2) return "bg-tan/40";
-    return "bg-tan/20";
-  }
-
-  return (
-    <div
-      className="w-full"
-      style={{
-        display: "grid",
-        gridTemplateRows: "repeat(7, 10px)",
-        gridAutoFlow: "column",
-        gridAutoColumns: "1fr",
-        gap: "2px",
-      }}
-    >
-      {cells.map((d, i) => (
-        <div
-          key={i}
-          className={`rounded-[2px] ${cellColor(d.message_count)}`}
-          title={d.date ? `${d.date}: ${d.message_count}` : undefined}
-        />
-      ))}
-    </div>
-  );
-}
+import {
+  getDashboardMe,
+  getPublicLinks,
+  getPublicMessageHeatmap,
+  getPublicStats,
+} from "@/lib/public-api";
+import { Heatmap } from "@/components/heatmap";
 
 export default async function Home() {
   const cookieStore = await cookies();
   const cookieHeader = cookieStore.toString();
-  const [links, dashboard, heatmap] = await Promise.all([
+  const [links, dashboard, heatmap, stats] = await Promise.all([
     getPublicLinks(),
     getDashboardMe(cookieHeader),
     getPublicMessageHeatmap(365),
+    getPublicStats(),
   ]);
 
   const loginHref = dashboard ? "/dashboard" : links.login_url;
+  const messagesTracked = stats.messages_tracked || heatmap.total_messages;
 
   return (
     <div className="min-h-screen bg-plum">
@@ -68,12 +31,12 @@ export default async function Home() {
       {/* Hero */}
       <section className="px-8 pt-14 pb-16">
         <h1 className="text-5xl md:text-6xl font-display leading-tight text-cream tracking-tight">
-          Build better Discord<br />
-          communities. Instantly.
+          Know what your<br />
+          Discord needs next.
         </h1>
         <p className="mt-4 text-cream/50 text-lg max-w-lg leading-relaxed">
-          Guildest provides the right stats, so you could correctly improve your
-          community
+          Guildest maps your server, indexes the conversations that matter, and
+          turns community activity into live pulses, alerts, and clear next steps.
         </p>
 
         <div className="flex gap-3 mt-8">
@@ -100,7 +63,7 @@ export default async function Home() {
       <section className="pb-20">
         <Heatmap days={heatmap.days} />
         <p className="mt-2 text-center text-[10px] text-cream/25">
-          {heatmap.total_messages.toLocaleString()} messages tracked
+          {messagesTracked.toLocaleString()} messages indexed
         </p>
       </section>
     </div>
