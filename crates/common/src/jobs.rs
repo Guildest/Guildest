@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub const BACKFILL_STREAM: &str = "jobs.backfill";
-pub const AI_CLASSIFY_STREAM: &str = "jobs.ai_classify";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackfillJob {
@@ -15,27 +14,6 @@ pub struct BackfillJob {
     pub end_at: DateTime<Utc>,
     pub requested_at: DateTime<Utc>,
     pub trigger_source: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AiClassifyJob {
-    pub observation_id: i64,
-    pub guild_id: String,
-    pub channel_id: String,
-}
-
-impl AiClassifyJob {
-    pub fn new(
-        observation_id: i64,
-        guild_id: impl Into<String>,
-        channel_id: impl Into<String>,
-    ) -> Self {
-        Self {
-            observation_id,
-            guild_id: guild_id.into(),
-            channel_id: channel_id.into(),
-        }
-    }
 }
 
 impl BackfillJob {

@@ -10,13 +10,8 @@ axum.workspace = true
 chrono.workspace = true
 common = { path = "../common" }
 prometheus.workspace = true
-redis.workspace = true
-regex.workspace = true
-reqwest.workspace = true
-serde.workspace = true
 serde_json.workspace = true
 serenity.workspace = true
-sha2.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
 tracing.workspace = true

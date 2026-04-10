@@ -8,20 +8,15 @@ use anyhow::{Context, Result};
 use axum::{Router, extract::State, response::IntoResponse, routing::get};
 use chrono::{DateTime, Utc};
 use common::{
-    ai::{AiStore, NewAiMessageObservation, PostgresAiStore},
     config::Settings,
     events::{
         EventEnvelope, EventPayload, GuildAvailablePayload, GuildRemovedPayload,
         MemberJoinedPayload, MemberLeftPayload, MemberRolesUpdatedPayload, MessageCreatedPayload,
         ReactionAddedPayload, VoiceStateUpdatedPayload,
     },
-    jobs::{AI_CLASSIFY_STREAM, AiClassifyJob},
     queue::{EventQueue, QueuedEventRef, RedisEventQueue},
     store::{PostgresRawEventStore, RawEventStore},
 };
-use regex::Regex;
-use sha2::{Digest, Sha256};
-use std::sync::LazyLock;
 use prometheus::{Encoder, HistogramOpts, HistogramVec, IntCounterVec, Registry, TextEncoder};
 use serenity::{
     Client,
@@ -39,38 +34,6 @@ use tracing_subscriber::EnvFilter;
 
 static METRICS: OnceLock<GatewayMetrics> = OnceLock::new();
 
-const REDACTION_VERSION: &str = "v1";
-
-/// Patterns that identify PII or secrets. Each match is replaced with a placeholder.
-static REDACTION_PATTERNS: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(|| {
-    vec![
-        ("EMAIL", Regex::new(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}").unwrap()),
-        ("PHONE", Regex::new(r"\b(\+?1[\s\-.]?)?\(?\d{3}\)?[\s\-.]?\d{3}[\s\-.]?\d{4}\b").unwrap()),
-        ("API_KEY", Regex::new(r"\b(sk|pk|token|key|secret|bearer|auth)[-_]?[A-Za-z0-9]{16,}\b").unwrap()),
-        ("URL_TOKEN", Regex::new(r"https?://[^\s]*[?&](token|key|secret|auth|code|access_token)=[^\s&]+").unwrap()),
-        ("WALLET", Regex::new(r"\b0x[a-fA-F0-9]{40}\b|\b[13][a-km-zA-HJ-NP-Z1-9]{25,34}\b").unwrap()),
-        ("IP_ADDR", Regex::new(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b").unwrap()),
-        ("NAME_PATTERN", Regex::new(r"(?i)\b(my name is|i'm|i am)\s+[A-Z][a-z]+\b").unwrap()),
-        ("FILE_PATH", Regex::new(r"/[Uu]sers/[^/\s]+").unwrap()),
-    ]
-});
-
-fn redact_content(text: &str) -> String {
-    let mut result = text.to_string();
-    for (label, pattern) in REDACTION_PATTERNS.iter() {
-        result = pattern
-            .replace_all(&result, format!("[{label}]").as_str())
-            .into_owned();
-    }
-    result
-}
-
-fn sha256_hex(text: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(text.as_bytes());
-    format!("{:x}", hasher.finalize())
-}
-
 struct GatewayMetrics {
     event_dispatch_duration_seconds: HistogramVec,
     event_payload_bytes: HistogramVec,
@@ -82,7 +45,6 @@ struct GatewayMetrics {
 }
 
 struct Pipeline {
-    ai_store: PostgresAiStore,
     queue: RedisEventQueue,
     store: PostgresRawEventStore,
 }
@@ -350,43 +312,23 @@ impl EventHandler for Handler {
             return;
         };
 
-        let guild_id_str = guild_id.to_string();
-        let channel_id_str = message.channel_id.to_string();
-        let message_id_str = message.id.to_string();
-        let author_id_str = message.author.id.to_string();
-        let is_bot = message.author.bot;
-        let content = message.content.clone();
-        let occurred_at = timestamp_to_chrono(&message.timestamp);
-
         let envelope = EventEnvelope::new(
-            guild_id_str.clone(),
-            Some(channel_id_str.clone()),
-            Some(author_id_str.clone()),
-            occurred_at,
+            guild_id.to_string(),
+            Some(message.channel_id.to_string()),
+            Some(message.author.id.to_string()),
+            timestamp_to_chrono(&message.timestamp),
             EventPayload::MessageCreated(MessageCreatedPayload {
-                message_id: message_id_str.clone(),
-                author_id: author_id_str.clone(),
-                is_bot,
+                message_id: message.id.to_string(),
+                author_id: message.author.id.to_string(),
+                is_bot: message.author.bot,
                 is_reply: message.referenced_message.is_some()
                     || message.message_reference.is_some(),
                 attachment_count: i32::try_from(message.attachments.len()).unwrap_or(i32::MAX),
-                content_length: i32::try_from(content.chars().count()).unwrap_or(i32::MAX),
+                content_length: i32::try_from(message.content.chars().count()).unwrap_or(i32::MAX),
             }),
         );
 
         self.dispatch(envelope).await;
-
-        if !is_bot {
-            self.capture_ai_observation(
-                &guild_id_str,
-                &channel_id_str,
-                &message_id_str,
-                &author_id_str,
-                occurred_at,
-                &content,
-            )
-            .await;
-        }
     }
 
     async fn reaction_add(&self, _: DiscordContext, reaction: Reaction) {
@@ -438,80 +380,6 @@ impl EventHandler for Handler {
     }
 }
 
-impl Handler {
-    async fn capture_ai_observation(
-        &self,
-        guild_id: &str,
-        channel_id: &str,
-        message_id: &str,
-        author_id: &str,
-        occurred_at: DateTime<Utc>,
-        content: &str,
-    ) {
-        let enabled = match self
-            .pipeline
-            .ai_store
-            .is_content_capture_enabled(guild_id, channel_id)
-            .await
-        {
-            Ok(v) => v,
-            Err(err) => {
-                error!(?err, "failed to check ai content capture");
-                return;
-            }
-        };
-
-        if !enabled {
-            return;
-        }
-
-        let (content_redacted, content_fingerprint, redaction_status) = if content.is_empty() {
-            (None, None, "not_captured")
-        } else {
-            (
-                Some(redact_content(content)),
-                Some(sha256_hex(content)),
-                "redacted",
-            )
-        };
-
-        let obs = NewAiMessageObservation {
-            guild_id: guild_id.to_string(),
-            channel_id: channel_id.to_string(),
-            message_id: message_id.to_string(),
-            author_id: author_id.to_string(),
-            occurred_at,
-            content_redacted,
-            content_fingerprint,
-            redaction_status,
-            redaction_version: Some(REDACTION_VERSION.to_string()),
-        };
-
-        let obs_id = match self.pipeline.ai_store.insert_observation(&obs).await {
-            Ok(id) => id,
-            Err(err) => {
-                error!(?err, "failed to insert ai observation");
-                return;
-            }
-        };
-
-        let job = AiClassifyJob::new(obs_id, guild_id, channel_id);
-        match serde_json::to_string(&job) {
-            Ok(payload) => {
-                if let Err(err) = self
-                    .pipeline
-                    .queue
-                    .publish(AI_CLASSIFY_STREAM, &payload)
-                    .await
-                {
-                    error!(?err, "failed to publish ai classify job");
-                }
-            }
-            Err(err) => error!(?err, "failed to serialize ai classify job"),
-        }
-    }
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let settings = Settings::from_env()?;
@@ -523,15 +391,12 @@ async fn main() -> Result<()> {
         .await
         .context("failed to connect to postgres")?;
 
-    let store = PostgresRawEventStore::new(pool.clone());
+    let store = PostgresRawEventStore::new(pool);
     store.ensure_schema().await?;
-
-    let ai_store = PostgresAiStore::new(pool);
-    ai_store.ensure_schema().await?;
 
     let queue = RedisEventQueue::new(&settings.redis_url)?;
     let handler = Handler {
-        pipeline: Arc::new(Pipeline { ai_store, queue, store }),
+        pipeline: Arc::new(Pipeline { queue, store }),
     };
     let metrics_addr: SocketAddr = settings
         .gateway_metrics_bind_addr
@@ -550,9 +415,6 @@ async fn main() -> Result<()> {
 
     if settings.discord_enable_guild_members_intent {
         intents |= GatewayIntents::GUILD_MEMBERS;
-    }
-    if settings.discord_enable_message_content_intent {
-        intents |= GatewayIntents::MESSAGE_CONTENT;
     }
 
     let mut client = Client::builder(&settings.discord_token, intents)

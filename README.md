@@ -1,184 +1,40 @@
 # Guildest
 
-![Status](https://img.shields.io/badge/status-active%20development-2ea44f)
-![Rust](https://img.shields.io/badge/Rust-2024-orange?logo=rust)
-![Next.js](https://img.shields.io/badge/Next.js-16-black?logo=nextdotjs)
-![Postgres](https://img.shields.io/badge/Postgres-17-336791?logo=postgresql&logoColor=white)
-![Valkey](https://img.shields.io/badge/Valkey-8-a41e11)
-![License](https://img.shields.io/badge/license-MIT-blue)
+Discord analytics bot built in Rust with `serenity`, local Postgres, local Redis or Valkey, and a Vercel-friendly read layer.
 
-Guildest is a Discord community intelligence platform. Today it ingests Discord events, builds analytics from message/member/voice activity, and serves a web dashboard. The long-term direction is an AI community operator: a bot that understands the shape of a Discord server, surfaces what needs attention, and helps owners turn conversation into action.
+## Services
 
-The project is built around a simple rule: keep Discord ingestion reliable, preserve enough event history to recompute analytics, and do expensive work in background workers.
+- `api`: public stats API and backend read endpoints
+- `gateway`: Discord gateway intake and event normalization
+- `worker`: queue consumers that build analytics state
+- `common`: shared event, config, queue, and storage primitives
 
-## What It Does Today
+## Local setup
 
-- Captures Discord gateway events with a thin Rust `serenity` gateway service
-- Stores normalized raw events in Postgres
-- Publishes event references through Redis or Valkey streams
-- Builds analytics in worker processes
-- Tracks member lifecycle, message activity, channel health, retention, activation, voice sessions, and queue health
-- Serves dashboard APIs from aggregated tables and cache-friendly read models
-- Provides a Next.js dashboard for installed guilds and authenticated admins
-- Includes local backfill and intake labs for testing pipeline behavior
+1. Copy `.env.example` to `.env` and fill in the Discord values.
+2. Start the full stack with `docker-compose up --build`.
 
-## Where It Is Going
+If you want to run only the local infrastructure and keep the Rust processes on your host:
 
-Guildest is being shaped into an AI-first Discord operator rather than a plain stats bot.
+1. Start Postgres and Redis with `docker-compose up -d postgres redis`.
+2. Run the API with `cargo run -p api`.
+3. Run the gateway with `cargo run -p gateway`.
+4. Run the workers with `cargo run -p worker`.
 
-Planned AI direction:
+For synthetic worker backfill load without Discord REST, see [docs/worker-backfill-benchmark.md](/Users/ace/projects/guildest-worktrees/parse-footprint-lab/docs/worker-backfill-benchmark.md).
 
-- **Live Pulse**: an hourly view of what changed and what needs attention
-- **Real-time alerts**: high-signal alerts for urgent support, pricing, launch, onboarding, or moderation issues
-- **Server Map**: an agent-built understanding of each server's type, channels, roles, bots, gates, and owner goals
-- **Adaptive dashboard**: show only the modules a server actually needs
-- **Ask Guildest**: admin-only questions over server context
-- **Action drafts**: suggested replies, announcements, FAQs, and follow-ups for owner approval
+## Required Discord intents
 
-The AI product plan is documented in [docs/ai-agent-pivot.md](docs/ai-agent-pivot.md).
+Enable these bot intents in the Discord developer portal:
 
-## Architecture
+- Server Members Intent if you set `DISCORD_ENABLE_GUILD_MEMBERS_INTENT=true`
+- Message Content Intent if you later decide to use message content
 
-```text
-Discord Gateway
-    |
-    v
-gateway service
-    | normalize + persist
-    +---------------------> Postgres raw_events
-    |
-    +---------------------> Redis/Valkey streams
-                                 |
-                                 v
-                              workers
-                                 |
-                                 +------> fact tables
-                                 +------> rollups / cache
-                                                 |
-                                                 v
-                                           API + dashboard
-```
+The current implementation tracks metadata and does not require message content to function. Member join and leave lifecycle tracking is disabled unless `DISCORD_ENABLE_GUILD_MEMBERS_INTENT=true`.
 
-Services:
+## Public stats endpoint
 
-- `crates/gateway`: Discord gateway connection, event normalization, raw event persistence, queue publishing
-- `crates/worker`: queue consumers, historical backfill, analytics updates, rollups, retry/dead-letter handling
-- `crates/api`: public stats, OAuth, dashboard APIs, install flow, operational endpoints
-- `crates/common`: shared config, event types, queue, job, and storage primitives
-- `web`: Next.js dashboard and landing/read layer
-
-## Repository Layout
-
-```text
-.
-├── crates/
-│   ├── api/          # Axum API service
-│   ├── common/       # Shared Rust library
-│   ├── gateway/      # Discord gateway intake
-│   ├── intake-lab/   # Synthetic intake/load experiments
-│   └── worker/       # Analytics and backfill workers
-├── docs/             # Architecture, experiments, roadmap notes
-├── infra/            # Local Prometheus and backfill lab compose files
-├── scripts/          # Local helper scripts
-├── web/              # Next.js dashboard
-├── docker-compose.yml
-└── README.md
-```
-
-## Quick Start
-
-Requirements:
-
-- Rust toolchain from [rust-toolchain.toml](rust-toolchain.toml)
-- Docker and Docker Compose
-- Node.js and npm for the dashboard
-- A Discord application/bot token
-
-Copy the environment file:
-
-```bash
-cp .env.example .env
-```
-
-Fill in:
-
-```text
-DISCORD_TOKEN
-DISCORD_APPLICATION_ID
-DISCORD_CLIENT_SECRET
-PUBLIC_API_BASE_URL
-PUBLIC_SITE_URL
-```
-
-Start the backend stack:
-
-```bash
-docker-compose up --build
-```
-
-The API listens on:
-
-```text
-http://127.0.0.1:8080
-```
-
-Run the dashboard:
-
-```bash
-cd web
-cp .env.example .env.local
-npm install
-npm run dev
-```
-
-The dashboard listens on:
-
-```text
-http://127.0.0.1:3000
-```
-
-## Running Services Manually
-
-If you want Postgres and Valkey in Docker but Rust services on your host:
-
-```bash
-docker-compose up -d postgres redis
-cargo run -p api
-cargo run -p gateway
-cargo run -p worker
-```
-
-Useful health and metrics endpoints:
-
-- `GET /health` on the API service
-- `GET /metrics` on the API service
-- `GET /metrics` on the worker metrics listener
-- `GET /metrics` on the gateway metrics listener
-
-## Discord Setup
-
-Add these OAuth redirect URLs in the Discord developer portal for production:
-
-```text
-https://api.guildest.site/v1/public/oauth/callback
-https://guildest.site/dashboard
-```
-
-For local development, set `PUBLIC_API_BASE_URL` and `PUBLIC_SITE_URL` in `.env` to your local API and dashboard URLs.
-
-Required Discord intents:
-
-- `GUILDS`
-- `GUILD_MESSAGES`
-- `GUILD_MESSAGE_REACTIONS`
-- `GUILD_VOICE_STATES`
-- `GUILD_MEMBERS` only when `DISCORD_ENABLE_GUILD_MEMBERS_INTENT=true`
-
-The current implementation tracks message metadata and does not require Message Content Intent. The AI roadmap introduces opt-in content analysis with redaction and retention controls.
-
-## API Highlights
-
-Public endpoints:
+The public landing-page stats are served from:
 
 - `GET /v1/public/stats`
 - `GET /v1/public/stats/stream`
@@ -186,64 +42,30 @@ Public endpoints:
 - `GET /v1/public/oauth/start/login`
 - `GET /v1/public/oauth/start/invite`
 - `GET /v1/public/install/start`
+
+`/v1/public/stats/stream` is a Server-Sent Events endpoint that pushes updated stats as soon as
+the worker publishes a refresh notification, which avoids client polling delay.
+
+The OAuth callback used by both landing-page CTAs is:
+
 - `GET /v1/public/oauth/callback`
 
-Dashboard endpoints include:
+Expected deployment split:
 
-- `GET /v1/dashboard/me`
-- `GET /v1/dashboard/guilds/{guild_id}/messages/summary`
-- `GET /v1/dashboard/guilds/{guild_id}/summary/health`
-- `GET /v1/dashboard/guilds/{guild_id}/retention/cohorts`
-- `GET /v1/dashboard/guilds/{guild_id}/activation/funnel`
-- `GET /v1/dashboard/guilds/{guild_id}/channels/hotspots`
-- `GET /v1/dashboard/guilds/{guild_id}/users/summary`
-- `GET /v1/dashboard/guilds/{guild_id}/ops/pipeline`
+- `guildest.site`: Next.js site
+- `api.guildest.site`: backend API
 
-## Development Notes
+## Discord OAuth setup
 
-Format Rust code:
+Add these redirect URLs in the Discord developer portal:
 
-```bash
-cargo fmt
-```
+- `https://api.guildest.site/v1/public/oauth/callback`
+- `https://guildest.site/dashboard`
 
-Check Rust code:
+Required environment variables for the public OAuth flow:
 
-```bash
-cargo check --workspace
-```
+- `DISCORD_CLIENT_SECRET`
+- `PUBLIC_API_BASE_URL`
+- `PUBLIC_SITE_URL`
 
-Run the dashboard lint:
-
-```bash
-cd web
-npm run lint
-```
-
-Run a local historical backfill lab without calling Discord:
-
-```bash
-scripts/backfill-lab-serve.sh
-scripts/backfill-lab-trigger.sh
-```
-
-See [docs/backfill-lab.md](docs/backfill-lab.md) for details.
-
-## Documentation
-
-- [Architecture](docs/architecture.md)
-- [AI agent pivot](docs/ai-agent-pivot.md)
-- [Analytics tracking plan](docs/analytics-tracking.md)
-- [Backfill lab](docs/backfill-lab.md)
-- [Intake footprint lab](docs/intake-footprint-lab.md)
-- [Worker backfill benchmark](docs/worker-backfill-benchmark.md)
-
-## Project Status
-
-Guildest is early and moving quickly. The core ingestion, worker, API, and dashboard pieces are in active development. The AI-agent work is currently planned in docs and should be treated as roadmap unless the code says otherwise.
-
-Issues and pull requests are welcome.
-
-## License
-
-MIT. See the workspace package metadata in [Cargo.toml](Cargo.toml).
+The bot invite permission bitset is currently defined in code in [crates/api/src/main.rs](/Users/ace/projects/guildest/crates/api/src/main.rs) so permission changes ship alongside feature changes.
