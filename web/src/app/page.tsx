@@ -44,56 +44,46 @@ export default async function Home() {
   const loginHref = dashboard ? "/dashboard" : links.login_url;
 
   return (
-    <div className="min-h-screen bg-plum overflow-hidden">
-      {/* Ambient glow behind hero */}
-      <div
-        className="pointer-events-none absolute inset-0 z-0"
-        style={{
-          background:
-            "radial-gradient(ellipse 80% 50% at 20% 0%, rgba(212,165,116,0.07) 0%, transparent 70%), radial-gradient(ellipse 60% 40% at 80% 20%, rgba(90,70,140,0.08) 0%, transparent 60%)",
-        }}
-      />
+    <div className="min-h-screen bg-plum">
+      {/* Logo */}
+      <div className="px-8 pt-8">
+        <Image src="/logolanding.svg" alt="Guildest logo" width={48} height={44} />
+      </div>
 
-      <div className="relative z-10 max-w-5xl mx-auto px-6 md:px-10">
-        {/* Logo */}
-        <div className="pt-8 pb-2">
-          <Image src="/logolanding.svg" alt="Guildest" width={44} height={40} />
+      {/* Hero */}
+      <section className="px-8 pt-14 pb-16">
+        <h1 className="text-5xl md:text-6xl font-display leading-tight text-cream tracking-tight">
+          Build better Discord<br />
+          communities. Instantly.
+        </h1>
+        <p className="mt-4 text-cream/50 text-lg max-w-lg leading-relaxed">
+          Guildest provides the right stats, so you could correctly improve your
+          community
+        </p>
+
+        <div className="flex gap-3 mt-8">
+          <a
+            href={links.invite_url}
+            className="flex items-center justify-center gap-3 bg-tan text-plum font-medium hover:bg-sand transition-colors rounded-2xl"
+            style={{ width: 180, height: 56 }}
+          >
+            <span>Invite</span>
+            <Image src="/arrow.svg" alt="" width={24} height={24} />
+          </a>
+          <a
+            href={loginHref}
+            className="flex items-center justify-center gap-3 bg-surface-light border border-border-light text-cream font-medium hover:bg-surface transition-colors rounded-2xl"
+            style={{ width: 180, height: 56 }}
+          >
+            <span>Login</span>
+            <Image src="/discord.svg" alt="" width={28} height={28} />
+          </a>
         </div>
+      </section>
 
-        {/* Hero */}
-        <section className="pt-14 pb-12">
-          <p className="text-tan/80 text-xs font-semibold uppercase tracking-widest mb-4">
-            AI community operator
-          </p>
-          <h1 className="text-5xl md:text-6xl font-display leading-[1.08] text-cream tracking-tight max-w-xl">
-            Your Discord<br />server,<br />understood.
-          </h1>
-          <p className="mt-5 text-cream/50 text-base md:text-lg max-w-md leading-relaxed">
-            Guildest watches your community around the clock, surfaces what
-            matters, and tells you exactly what to do next.
-          </p>
+      <div className="px-8 lg:px-16 max-w-5xl">
 
-          <div className="flex gap-3 mt-8">
-            <a
-              href={links.invite_url}
-              className="flex items-center justify-center gap-2.5 bg-tan text-plum font-semibold hover:bg-sand transition-colors rounded-2xl"
-              style={{ width: 164, height: 52 }}
-            >
-              <span>Invite</span>
-              <Image src="/arrow.svg" alt="" width={20} height={20} />
-            </a>
-            <a
-              href={loginHref}
-              className="flex items-center justify-center gap-2.5 bg-surface-light border border-border-light text-cream font-medium hover:bg-surface transition-colors rounded-2xl"
-              style={{ width: 164, height: 52 }}
-            >
-              <span>Login</span>
-              <Image src="/discord.svg" alt="" width={24} height={24} />
-            </a>
-          </div>
-        </section>
-
-        {/* Product preview */}
+        {/* Live Pulse card */}
         <section className="pb-20">
           {/* Panel shell */}
           <div
@@ -190,3 +180,4 @@ export default async function Home() {
     </div>
   );
 }
+
