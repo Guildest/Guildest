@@ -3,10 +3,16 @@ import Image from "next/image";
 import { getDashboardMe, getPublicLinks, getPublicMessageHeatmap } from "@/lib/public-api";
 
 function Heatmap({ days }: { days: Array<{ date: string; message_count: number }> }) {
-  const max = Math.max(...days.map((d) => d.message_count), 1);
+  // Always render 365 cells — fill with zeros if API returned nothing
+  const cells: Array<{ date: string; message_count: number }> =
+    days.length > 0
+      ? days
+      : Array.from({ length: 365 }, (_, i) => ({ date: String(i), message_count: 0 }));
+
+  const max = Math.max(...cells.map((d) => d.message_count), 1);
 
   function cellColor(count: number) {
-    if (count === 0) return "bg-surface-light";
+    if (count === 0) return "bg-white/[0.07]";
     const level = Math.ceil((count / max) * 4);
     if (level >= 4) return "bg-tan";
     if (level === 3) return "bg-tan/70";
@@ -15,11 +21,11 @@ function Heatmap({ days }: { days: Array<{ date: string; message_count: number }
   }
 
   return (
-    <div className="flex gap-[2px] w-full">
-      {days.map((d) => (
+    <div className="flex gap-[3px] w-full">
+      {cells.map((d, i) => (
         <div
-          key={d.date}
-          className={`flex-1 h-8 rounded-[2px] min-w-0 ${cellColor(d.message_count)}`}
+          key={d.date || i}
+          className={`flex-1 h-8 rounded-sm min-w-0 ${cellColor(d.message_count)}`}
           title={`${d.date}: ${d.message_count} messages`}
         />
       ))}
