@@ -60,7 +60,7 @@ export default async function Home() {
       </section>
 
       {/* Heatmap */}
-      <section className="pb-20">
+      <section className="mt-32 pb-20">
         <Heatmap days={heatmap.days} />
         <p className="mt-2 text-center text-[10px] text-cream/25">
           {messagesTracked.toLocaleString()} messages indexed
