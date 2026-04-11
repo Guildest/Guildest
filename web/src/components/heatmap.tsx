@@ -57,7 +57,11 @@ export function Heatmap({ days }: { days: Day[] }) {
       {tooltip && (
         <div
           className="fixed z-50 pointer-events-none px-2.5 py-1.5 rounded-lg text-xs text-cream bg-surface border border-border shadow-lg whitespace-nowrap"
-          style={{ left: tooltip.x + 12, top: tooltip.y - 36 }}
+          style={{
+            left: tooltip.x + 220 > window.innerWidth ? tooltip.x - 12 : tooltip.x + 12,
+            top: tooltip.y - 36,
+            transform: tooltip.x + 220 > window.innerWidth ? "translateX(-100%)" : undefined,
+          }}
         >
           <span className="font-medium">{tooltip.day.message_count.toLocaleString()} messages</span>
           <span className="text-cream/40 ml-1.5">{tooltip.day.date}</span>
