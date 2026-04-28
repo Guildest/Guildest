@@ -41,11 +41,11 @@ export default async function Home() {
 
         <div className="flex gap-3 mt-8">
           <a
-            href={links.invite_url}
+            href="/waitlist"
             className="flex items-center justify-center gap-3 bg-tan text-plum font-medium hover:bg-sand transition-colors rounded-2xl"
-            style={{ width: 180, height: 56 }}
+            style={{ width: 200, height: 56 }}
           >
-            <span>Invite</span>
+            <span>Join waitlist</span>
             <Image src="/arrow.svg" alt="" width={24} height={24} />
           </a>
           <a
@@ -59,12 +59,32 @@ export default async function Home() {
         </div>
       </section>
 
-      {/* Heatmap */}
-      <section className="mt-32 pb-20">
-        <Heatmap days={heatmap.days} />
-        <p className="mt-2 text-center text-[10px] text-cream/25">
-          {messagesTracked.toLocaleString()} messages indexed
-        </p>
+      {/* Community activity - the pulse */}
+      <section className="mt-12 pb-20 px-8">
+        {/* Stats floating above */}
+        <div className="flex items-end justify-between mb-6">
+          <div className="flex items-center gap-3">
+            <div className="w-1.5 h-1.5 rounded-full bg-tan/60 animate-pulse" />
+            <span className="text-[11px] text-cream/40 tracking-widest uppercase">Live pulse</span>
+          </div>
+          <div className="flex items-baseline gap-8">
+            <div className="text-right">
+              <span className="text-3xl font-display text-tan">{messagesTracked.toLocaleString()}</span>
+              <p className="text-[10px] text-cream/25 mt-0.5">messages</p>
+            </div>
+          </div>
+        </div>
+
+        {/* Heatmap - the only density in vast space */}
+        <div className="border border-border-light/30 rounded-xl p-6 bg-surface-light/[0.02]">
+          <Heatmap days={heatmap.days} servers={stats.servers} members={stats.members} />
+        </div>
+
+        {/* Subtle footer line */}
+        <div className="flex items-center justify-between mt-4 text-[10px] text-cream/20">
+          <span>{stats.servers.toLocaleString()} communities · {stats.members.toLocaleString()} members</span>
+          <span>Last 365 days</span>
+        </div>
       </section>
     </div>
   );
