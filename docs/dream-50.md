@@ -128,6 +128,36 @@ Floor price tracks community health; owners already pay for tooling.
 
 ---
 
+## ICP note: consumer, not enterprise
+
+The list above skews toward communities whose members are **end-consumers, prosumers, or hobbyists** — people whose primary support and conversation surface really is Discord. Enterprise-only companies are explicitly out of scope: their customers route to Slack Connect, shared channels, or a CSM, so their Discord (if it exists) is a side stage with little signal worth analyzing. Guildest only pays back when Discord is the main room.
+
+---
+
+## Tier 2: smaller, consumer-led communities (15)
+
+Lower-scale targets — typically 1k–20k members — where the founder still reads every channel themselves and is starting to lose the thread. Cheaper to land, faster feedback loop, and every one of them serves consumers (not buyers in procurement). Good bench for swap-ins when a Dream 50 target falls out.
+
+| # | Server | Why it fits | Lead hook |
+|---|---|---|---|
+| 51 | Raycast | Prosumer Mac users, plugin authors, founder-active | Plugin-author activation tracking |
+| 52 | Arc Browser (The Browser Company) | Consumer browser, fan community, release-driven | "What changed this week" digest |
+| 53 | Obsidian | Hobbyist note-takers, plugin ecosystem | Server Map for plugin vs. core vs. help |
+| 54 | Logseq | Smaller Obsidian-shaped community | Same hook, easier first call |
+| 55 | Framework Laptop | Consumer hardware, repair + mods + support mixed | Triage of support vs. mod showcase |
+| 56 | Keychron / mechanical keyboard makers | Hobbyist hardware, GB drops spike activity | Drop-window alerting |
+| 57 | Prusa / Bambu Lab community | 3D printing hobbyists, heavy support load | Auto-FAQ from recurring print issues |
+| 58 | Pikmin Bloom / Niantic side games | Consumer game, regional player clusters | Per-region engagement reporting |
+| 59 | Dwarf Fortress (Bay 12 / Kitfox) | Indie game, devoted fanbase, small team | Founder-as-buyer, fast loop |
+| 60 | Balatro / LocalThunk community | Indie game, single-dev, exploding interest | Pre-empt the scaling chaos |
+| 61 | Caves of Qud / Freehold Games | Indie roguelike, small studio, paid players | Player retention by patch |
+| 62 | Dwarves of Glistenveld / smaller indie MMOs | Pre-launch and early-access communities | Activation funnel from join → first session |
+| 63 | Suno / Udio music-gen users | Consumer AI, hobbyist creators, fast-growing | Sentiment alerts on model updates |
+| 64 | Krea / smaller consumer AI image apps | Consumer creators, founder-reachable | Same hook, smaller scale |
+| 65 | Beeper / Texts.com | Consumer messaging app, prosumer beta crowd | Beta-feedback clustering |
+
+These are sized so a single founder-level conversation can close them, and the value shows up inside one release cycle — not a quarter.
+
 ## How to work the list
 
 1. **Cluster by segment, not by row.** Run one segment at a time so the messaging compounds.
