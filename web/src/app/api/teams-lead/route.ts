@@ -6,42 +6,41 @@ function getApiBaseUrl() {
 
 export async function POST(request: Request) {
   const body = await request.json().catch(() => null);
-  if (!body) {
-    return NextResponse.json({ error: "invalid body" }, { status: 400 });
+  if (!body || typeof body.email !== "string") {
+    return NextResponse.json({ error: "email required" }, { status: 400 });
   }
 
-  const cookieHeader = request.headers.get("cookie") ?? "";
   const userAgent = request.headers.get("user-agent") ?? "";
 
   try {
-    const upstream = await fetch(`${getApiBaseUrl()}/v1/public/waitlist`, {
+    const upstream = await fetch(`${getApiBaseUrl()}/v1/public/teams-lead`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Cookie: cookieHeader,
         "User-Agent": userAgent,
       },
       body: JSON.stringify({
-        source: body.source ?? null,
-        use_case: body.use_case ?? null,
-        notes: body.notes ?? null,
+        email: body.email,
+        name: body.name ?? null,
+        company: body.company ?? null,
+        message: body.message ?? null,
       }),
       cache: "no-store",
     });
 
     if (!upstream.ok) {
       const text = await upstream.text();
-      console.error("[waitlist] upstream failed", upstream.status, text);
+      console.error("[teams-lead] upstream failed", upstream.status, text);
       return NextResponse.json(
         { error: "upstream failed" },
-        { status: upstream.status === 401 ? 401 : 502 },
+        { status: upstream.status === 400 ? 400 : 502 },
       );
     }
 
     const data = await upstream.json();
     return NextResponse.json(data);
   } catch (err) {
-    console.error("[waitlist] network error", err);
+    console.error("[teams-lead] network error", err);
     return NextResponse.json({ error: "network error" }, { status: 502 });
   }
 }

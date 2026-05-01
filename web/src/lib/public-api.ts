@@ -33,10 +33,36 @@ export type GuildMessageSummary = {
   total_messages: number;
 };
 
+export type GuildMessageHeatmap = {
+  days: Array<{
+    date: string;
+    message_count: number;
+  }>;
+  days_requested: number;
+  guild_id: string;
+  time_zone: "UTC";
+  total_messages: number;
+  window_end_utc: string;
+  window_start_utc: string;
+};
+
 export type PublicStats = {
   members: number;
   messages_tracked: number;
   servers: number;
+};
+
+export type PublicMessageHeatmap = {
+  days: Array<{
+    date: string;
+    message_count: number;
+  }>;
+  days_requested: number;
+  scope: "all_guilds";
+  time_zone: "UTC";
+  total_messages: number;
+  window_end_utc: string;
+  window_start_utc: string;
 };
 
 export type GuildUsersSummary = {
@@ -269,6 +295,36 @@ export async function getPublicStats(): Promise<PublicStats> {
   }
 }
 
+export async function getPublicMessageHeatmap(
+  days = 365,
+): Promise<PublicMessageHeatmap> {
+  try {
+    const params = new URLSearchParams({ days: String(days) });
+    const response = await fetch(
+      `${getApiBaseUrl()}/v1/public/messages/heatmap?${params}`,
+      {
+        next: { revalidate: 60 },
+      },
+    );
+
+    if (!response.ok) {
+      throw new Error(`public message heatmap request failed: ${response.status}`);
+    }
+
+    return (await response.json()) as PublicMessageHeatmap;
+  } catch {
+    return {
+      days: [],
+      days_requested: days,
+      scope: "all_guilds",
+      time_zone: "UTC",
+      total_messages: 0,
+      window_end_utc: "",
+      window_start_utc: "",
+    };
+  }
+}
+
 export async function getDashboardMe(
   cookieHeader?: string,
 ): Promise<DashboardMe | null> {
@@ -314,6 +370,35 @@ export async function getGuildMessageSummary(
     }
 
     return (await response.json()) as GuildMessageSummary;
+  } catch {
+    return null;
+  }
+}
+
+export async function getGuildMessageHeatmap(
+  guildId: string,
+  cookieHeader?: string,
+  days = 365,
+): Promise<GuildMessageHeatmap | null> {
+  try {
+    const params = new URLSearchParams({ days: String(days) });
+    const response = await fetch(
+      `${getApiBaseUrl()}/v1/dashboard/guilds/${guildId}/messages/heatmap?${params}`,
+      {
+        cache: "no-store",
+        headers: cookieHeader ? { Cookie: cookieHeader } : undefined,
+      },
+    );
+
+    if (response.status === 401 || response.status === 403) {
+      return null;
+    }
+
+    if (!response.ok) {
+      throw new Error(`message heatmap request failed: ${response.status}`);
+    }
+
+    return (await response.json()) as GuildMessageHeatmap;
   } catch {
     return null;
   }

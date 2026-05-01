@@ -52,6 +52,7 @@ services:
       - .env
     environment:
       DATABASE_URL: postgres://guildest:guildest@postgres:5432/guildest
+      REDIS_URL: redis://redis:6379
       API_BIND_ADDR: 0.0.0.0:8080
     depends_on:
       postgres:

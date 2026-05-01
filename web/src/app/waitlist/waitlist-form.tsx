@@ -86,14 +86,16 @@ export function WaitlistForm({
 
   if (submitted) {
     return (
-      <div className="border border-border-light/40 rounded-2xl p-8 bg-surface-light/[0.03]">
-        <div className="flex items-center gap-3 mb-3">
-          <div className="w-2 h-2 rounded-full bg-tan animate-pulse" />
-          <span className="text-[11px] text-tan tracking-widest uppercase">You&apos;re in</span>
+      <div className="border border-border-light/30 p-8 md:p-12">
+        <div className="flex items-center gap-3 mb-4">
+          <div className="w-2 h-2 rounded-full bg-cream animate-pulse" />
+          <span className="text-[11px] text-cream/60 tracking-widest uppercase">You&apos;re in</span>
         </div>
-        <h2 className="text-2xl font-display text-cream">See you soon, {displayName}.</h2>
-        <p className="mt-3 text-cream/50 leading-relaxed">
-          We&apos;ll DM you on Discord when your spot opens. Until then — keep
+        <h2 className="font-display text-3xl md:text-4xl tracking-tight text-cream leading-tight">
+          See you soon,<br />{displayName}.
+        </h2>
+        <p className="mt-5 text-cream/55 leading-relaxed max-w-md">
+          We&apos;ll email you when your spot opens. Until then — keep
           building.
         </p>
       </div>
@@ -101,10 +103,10 @@ export function WaitlistForm({
   }
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-8">
-      <div className="flex items-center gap-3 text-[12px] text-cream/40">
+    <form onSubmit={handleSubmit} className="space-y-10">
+      <div className="flex items-center gap-3 text-[12px] text-cream/45 border border-border-light/20 px-4 py-3">
         <Image src="/discord.svg" alt="" width={16} height={16} />
-        <span>Signed in as <span className="text-cream/70">{displayName}</span></span>
+        <span>Signed in as <span className="text-cream/85">{displayName}</span></span>
       </div>
 
       <Field label="Where did you hear about us?">
@@ -128,14 +130,14 @@ export function WaitlistForm({
               type="button"
               key={u.value}
               onClick={() => setUseCase(u.value)}
-              className={`text-left rounded-xl border px-4 py-3 transition-colors ${
+              className={`text-left border px-4 py-4 transition-colors ${
                 useCase === u.value
-                  ? "bg-tan/10 border-tan/50 text-cream"
-                  : "bg-surface-light/[0.02] border-border-light/40 text-cream/70 hover:border-border-light hover:bg-surface-light/[0.05]"
+                  ? "bg-cream text-plum border-cream"
+                  : "bg-transparent border-border-light/30 text-cream/75 hover:border-border-light/60 hover:bg-surface-light/[0.04]"
               }`}
             >
               <div className="text-sm font-medium">{u.label}</div>
-              <div className="text-[12px] text-cream/40 mt-0.5">{u.hint}</div>
+              <div className={`text-[12px] mt-0.5 ${useCase === u.value ? "text-plum/60" : "text-cream/40"}`}>{u.hint}</div>
             </button>
           ))}
         </div>
@@ -145,24 +147,24 @@ export function WaitlistForm({
         <textarea
           value={notes}
           onChange={(e) => setNotes(e.target.value)}
-          rows={3}
+          rows={4}
           placeholder="Server size, what you wish Discord did, anything..."
-          className="w-full bg-surface-light/[0.02] border border-border-light/40 rounded-xl px-4 py-3 text-sm text-cream placeholder:text-cream/25 focus:outline-none focus:border-tan/50 resize-none"
+          className="w-full bg-transparent border border-border-light/30 px-4 py-3 text-sm text-cream placeholder:text-cream/25 focus:outline-none focus:border-cream/50 resize-none"
         />
       </Field>
 
       {error && <p className="text-sm text-red-400/80">{error}</p>}
 
-      <div>
+      <div className="flex items-center gap-3 flex-wrap">
         <button
           type="submit"
           disabled={!canSubmit}
-          className="inline-flex items-center justify-center gap-3 bg-tan text-plum font-medium hover:bg-sand transition-colors rounded-2xl disabled:opacity-40 disabled:cursor-not-allowed"
-          style={{ width: 220, height: 56 }}
+          className="inline-flex items-center justify-center gap-2 bg-cream text-plum text-sm font-medium px-5 py-3 hover:bg-cream/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
         >
           <span>{submitting ? "Joining..." : "Join the waitlist"}</span>
-          {!submitting && <Image src="/arrow.svg" alt="" width={24} height={24} />}
+          {!submitting && <Image src="/arrow.svg" alt="" width={16} height={16} />}
         </button>
+        <span className="text-[12px] text-cream/35">We let people in weekly.</span>
       </div>
     </form>
   );
@@ -192,10 +194,10 @@ function Chip({
     <button
       type="button"
       onClick={onClick}
-      className={`px-4 py-2 rounded-full text-sm transition-colors border ${
+      className={`px-4 py-2 text-sm transition-colors border ${
         active
-          ? "bg-tan text-plum border-tan"
-          : "bg-surface-light/[0.02] border-border-light/40 text-cream/70 hover:border-border-light hover:text-cream"
+          ? "bg-cream text-plum border-cream"
+          : "bg-transparent border-border-light/30 text-cream/75 hover:border-border-light/60 hover:text-cream"
       }`}
     >
       {children}

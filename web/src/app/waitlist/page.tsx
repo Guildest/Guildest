@@ -13,26 +13,31 @@ export default async function WaitlistPage() {
   ]);
 
   return (
-    <div className="min-h-screen bg-plum">
-      <div className="px-8 pt-8">
-        <Link href="/" className="inline-block">
-          <Image src="/logolanding.svg" alt="Guildest logo" width={48} height={44} />
+    <div className="relative min-h-screen bg-plum text-cream overflow-hidden">
+      <div aria-hidden className="absolute inset-0 ascii-bg pointer-events-none opacity-60" />
+
+      <div className="relative px-6 md:px-10 pt-8 pb-6 flex items-center justify-between">
+        <Link href="/" className="flex items-center">
+          <Image src="/logolanding.svg" alt="Guildest" width={32} height={30} />
+        </Link>
+        <Link
+          href="/"
+          className="text-[13px] text-cream/55 hover:text-cream transition-colors"
+        >
+          ← Back
         </Link>
       </div>
 
-      <section className="px-8 pt-14 pb-20 max-w-xl">
-        <p className="text-[11px] text-cream/40 tracking-widest uppercase mb-4">
-          Early access
-        </p>
-        <h1 className="text-5xl md:text-6xl font-display leading-tight text-cream tracking-tight">
+      <main className="relative max-w-xl mx-auto px-6 pt-12 md:pt-20 pb-24">
+        <h1 className="font-display text-5xl md:text-6xl leading-[1.02] tracking-tight text-cream">
           Let&apos;s create<br />better communities.
         </h1>
-        <p className="mt-5 text-cream/50 text-lg leading-relaxed">
-          Guildest turns your Discord into a living organism — AI that reads the
-          room, surfaces what matters, and helps you act on it. Join the waitlist.
+        <p className="mt-6 text-cream/55 leading-relaxed">
+          Guildest reads the room, surfaces what matters, and helps you act on
+          it. Tell us a bit about you and we&apos;ll get you in.
         </p>
 
-        <div className="mt-10">
+        <div className="mt-12">
           {dashboard ? (
             <WaitlistForm
               displayName={dashboard.user.display_name || dashboard.user.username}
@@ -42,7 +47,7 @@ export default async function WaitlistPage() {
             <SignInWithDiscord loginUrl={links.login_url} />
           )}
         </div>
-      </section>
+      </main>
     </div>
   );
 }
@@ -52,13 +57,11 @@ function SignInWithDiscord({ loginUrl }: { loginUrl: string }) {
     <div>
       <a
         href={loginUrl}
-        className="inline-flex items-center justify-center gap-3 bg-tan text-plum font-medium hover:bg-sand transition-colors rounded-2xl"
-        style={{ width: 280, height: 56 }}
+        className="inline-flex items-center justify-center bg-cream text-plum text-sm font-medium px-6 py-3 hover:bg-cream/90 transition-colors"
       >
-        <Image src="/discord.svg" alt="" width={24} height={24} />
-        <span>Sign up with Discord</span>
+        Sign up with Discord
       </a>
-      <p className="mt-3 text-[12px] text-cream/30">
+      <p className="mt-4 text-[12px] text-cream/35 max-w-sm leading-relaxed">
         We use Discord to verify you&apos;re a real human running a real server.
       </p>
     </div>

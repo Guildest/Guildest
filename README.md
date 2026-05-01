@@ -108,6 +108,9 @@ DISCORD_APPLICATION_ID
 DISCORD_CLIENT_SECRET
 PUBLIC_API_BASE_URL
 PUBLIC_SITE_URL
+RESEND_API_KEY
+RESEND_FROM_EMAIL
+GUILDEST_EMAIL_TO
 ```
 
 Start the backend stack:
@@ -136,6 +139,19 @@ The dashboard listens on:
 ```text
 http://127.0.0.1:3000
 ```
+
+## Temporary Vercel Frontend
+
+The `web` app can be deployed on Vercel while the Rust API runs elsewhere. Set
+the Vercel project root directory to `web` and configure:
+
+```text
+GUILDEST_API_BASE_URL=https://your-public-api-host
+```
+
+The Next.js API routes proxy form submissions and dashboard requests to that
+Rust API. Keep `RESEND_API_KEY`, `RESEND_FROM_EMAIL`, and `GUILDEST_EMAIL_TO`
+on the backend API host, not in Vercel.
 
 ## Running Services Manually
 
@@ -182,6 +198,7 @@ Public endpoints:
 
 - `GET /v1/public/stats`
 - `GET /v1/public/stats/stream`
+- `GET /v1/public/messages/heatmap`
 - `GET /v1/public/links`
 - `GET /v1/public/oauth/start/login`
 - `GET /v1/public/oauth/start/invite`
@@ -192,6 +209,7 @@ Dashboard endpoints include:
 
 - `GET /v1/dashboard/me`
 - `GET /v1/dashboard/guilds/{guild_id}/messages/summary`
+- `GET /v1/dashboard/guilds/{guild_id}/messages/heatmap`
 - `GET /v1/dashboard/guilds/{guild_id}/summary/health`
 - `GET /v1/dashboard/guilds/{guild_id}/retention/cohorts`
 - `GET /v1/dashboard/guilds/{guild_id}/activation/funnel`

@@ -2,4 +2,4 @@
 /.env
 /.env.backfill-lab
 /.backfill-lab
-/.DS_Store
+.DS_Store

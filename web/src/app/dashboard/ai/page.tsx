@@ -5,7 +5,6 @@ import {
   getDashboardMe,
   getAiSettings,
   getAiLivePulse,
-  getPublicLinks,
   type AiGuildSettings,
   type AiLivePulse,
 } from "@/lib/public-api";
@@ -196,13 +195,13 @@ export default async function AiDashboardPage({ searchParams }: AiPageProps) {
     .join("; ");
 
   const params = await searchParams;
-  const [me, links] = await Promise.all([
-    getDashboardMe(cookieHeader),
-    getPublicLinks(),
-  ]);
+  const me = await getDashboardMe(cookieHeader);
 
   const selectedGuildId =
     params.guild_id ?? me?.accessible_guilds?.[0]?.guild_id ?? null;
+  const selectedGuild =
+    me?.accessible_guilds.find((guild) => guild.guild_id === selectedGuildId) ??
+    null;
 
   const [settings, pulse] = selectedGuildId
     ? await Promise.all([
@@ -219,11 +218,14 @@ export default async function AiDashboardPage({ searchParams }: AiPageProps) {
         </div>
 
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-[220px_1fr]">
-          <GuildSidebar
-            guilds={me?.accessible_guilds ?? []}
-            selectedGuildId={selectedGuildId}
-            installUrl={links?.install_url ?? "#"}
-          />
+          {me && (
+            <GuildSidebar
+              accessibleGuilds={me.accessible_guilds}
+              basePath="/dashboard/ai"
+              dashboard={me}
+              selectedGuild={selectedGuild}
+            />
+          )}
 
           <div className="space-y-4">
             {!selectedGuildId && (
