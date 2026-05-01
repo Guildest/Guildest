@@ -5,10 +5,12 @@ COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates/common/Cargo.toml crates/common/Cargo.toml
 COPY crates/api/Cargo.toml crates/api/Cargo.toml
 COPY crates/gateway/Cargo.toml crates/gateway/Cargo.toml
+COPY crates/intake-lab/Cargo.toml crates/intake-lab/Cargo.toml
 COPY crates/worker/Cargo.toml crates/worker/Cargo.toml
 COPY crates/common/src crates/common/src
 COPY crates/api/src crates/api/src
 COPY crates/gateway/src crates/gateway/src
+COPY crates/intake-lab/src crates/intake-lab/src
 COPY crates/worker/src crates/worker/src
 
 FROM base-builder AS api-builder

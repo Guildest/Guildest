@@ -49,6 +49,7 @@ const SESSION_COOKIE_NAME: &str = "guildest_session";
 const SESSION_TTL_SECONDS: i64 = 60 * 60 * 24 * 30;
 const DASHBOARD_CACHE_TTL_SECONDS: u64 = 60;
 const DEAD_LETTER_ACTION_LOCK_TTL_SECONDS: u64 = 30;
+const RESEND_EMAILS_URL: &str = "https://api.resend.com/emails";
 
 #[derive(Clone)]
 struct AppState {
@@ -357,6 +358,28 @@ struct MessageSummaryDay {
 }
 
 #[derive(Debug, Serialize)]
+struct PublicMessageHeatmapResponse {
+    days: Vec<MessageSummaryDay>,
+    days_requested: i32,
+    scope: &'static str,
+    time_zone: &'static str,
+    total_messages: i64,
+    window_end_utc: String,
+    window_start_utc: String,
+}
+
+#[derive(Debug, Serialize)]
+struct DashboardMessageHeatmapResponse {
+    days: Vec<MessageSummaryDay>,
+    days_requested: i32,
+    guild_id: String,
+    time_zone: &'static str,
+    total_messages: i64,
+    window_end_utc: String,
+    window_start_utc: String,
+}
+
+#[derive(Debug, Serialize)]
 struct PublicLinksResponse {
     invite_url: String,
     install_url: String,
@@ -368,6 +391,43 @@ struct PublicStatsResponse {
     members: i64,
     messages_tracked: i64,
     servers: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct WaitlistSubmitRequest {
+    source: Option<String>,
+    use_case: Option<String>,
+    notes: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TeamsLeadSubmitRequest {
+    name: Option<String>,
+    email: String,
+    company: Option<String>,
+    message: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SubscribeSubmitRequest {
+    email: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ResendEmailRequest {
+    from: String,
+    to: Vec<String>,
+    subject: String,
+    text: String,
+    html: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reply_to: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct WaitlistSubmitResponse {
+    ok: bool,
+    id: Uuid,
 }
 
 #[derive(Debug, Deserialize)]
@@ -626,7 +686,12 @@ async fn main() -> Result<()> {
         .route("/metrics", get(metrics))
         .route("/v1/public/stats", get(public_stats))
         .route("/v1/public/stats/stream", get(public_stats_stream))
+        .route("/v1/public/messages/heatmap", get(public_message_heatmap))
         .route("/v1/public/links", get(public_links))
+        .route("/v1/public/waitlist", post(public_waitlist_submit))
+        .route("/v1/public/subscribe", post(public_subscribe_submit))
+        .route("/v1/public/teams-lead", post(public_teams_lead_submit))
+        .route("/v1/public/admin/waitlist", get(public_waitlist_export))
         .route("/v1/public/oauth/start/login", get(start_login_oauth))
         .route("/v1/public/oauth/start/invite", get(start_invite_oauth))
         .route("/v1/public/install/start", get(start_install))
@@ -635,6 +700,10 @@ async fn main() -> Result<()> {
         .route(
             "/v1/dashboard/guilds/{guild_id}/messages/summary",
             get(dashboard_guild_message_summary),
+        )
+        .route(
+            "/v1/dashboard/guilds/{guild_id}/messages/heatmap",
+            get(dashboard_guild_message_heatmap),
         )
         .route(
             "/v1/dashboard/guilds/{guild_id}/activation/funnel",
@@ -743,6 +812,402 @@ async fn public_links(
     }))
 }
 
+async fn public_waitlist_submit(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<WaitlistSubmitRequest>,
+) -> Result<Json<WaitlistSubmitResponse>, StatusCode> {
+    let session_id = read_session_id(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
+    let user = fetch_dashboard_user(&state.pool, session_id)
+        .await
+        .map_err(|_| StatusCode::UNAUTHORIZED)?;
+
+    let id = Uuid::new_v4();
+    let user_agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    let trim_opt = |s: Option<String>| s.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let source = trim_opt(request.source);
+    let use_case = trim_opt(request.use_case);
+    let notes = trim_opt(request.notes);
+
+    sqlx::query(
+        r#"
+        INSERT INTO waitlist_entries (
+            id, kind, discord_user_id, discord_username, discord_display_name,
+            source, use_case, notes, user_agent
+        )
+        VALUES ($1, 'waitlist', $2, $3, $4, $5, $6, $7, $8)
+        ON CONFLICT (discord_user_id)
+            WHERE discord_user_id IS NOT NULL AND kind = 'waitlist'
+        DO UPDATE SET
+            discord_username = EXCLUDED.discord_username,
+            discord_display_name = EXCLUDED.discord_display_name,
+            source = COALESCE(EXCLUDED.source, waitlist_entries.source),
+            use_case = COALESCE(EXCLUDED.use_case, waitlist_entries.use_case),
+            notes = COALESCE(EXCLUDED.notes, waitlist_entries.notes),
+            user_agent = COALESCE(EXCLUDED.user_agent, waitlist_entries.user_agent)
+        "#,
+    )
+    .bind(id)
+    .bind(&user.discord_user_id)
+    .bind(&user.username)
+    .bind(&user.display_name)
+    .bind(&source)
+    .bind(&use_case)
+    .bind(&notes)
+    .bind(&user_agent)
+    .execute(&state.pool)
+    .await
+    .map_err(|err| {
+        tracing::error!(?err, "failed to insert waitlist entry");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    send_form_email(
+        &state,
+        "New Guildest waitlist signup",
+        "New waitlist signup",
+        vec![
+            ("Discord display name", Some(user.display_name.as_str())),
+            ("Discord username", Some(user.username.as_str())),
+            ("Discord user ID", Some(user.discord_user_id.as_str())),
+            ("Source", source.as_deref()),
+            ("Use case", use_case.as_deref()),
+            ("Notes", notes.as_deref()),
+            ("User agent", user_agent.as_deref()),
+        ],
+        None,
+    )
+    .await
+    .map_err(|err| {
+        tracing::error!(?err, "failed to send waitlist email");
+        StatusCode::BAD_GATEWAY
+    })?;
+
+    Ok(Json(WaitlistSubmitResponse { ok: true, id }))
+}
+
+async fn public_teams_lead_submit(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<TeamsLeadSubmitRequest>,
+) -> Result<Json<WaitlistSubmitResponse>, StatusCode> {
+    let email = request.email.trim().to_lowercase();
+    if email.is_empty() || !email.contains('@') || email.len() > 320 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let id = Uuid::new_v4();
+    let user_agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    let trim_opt = |s: Option<String>| s.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let name = trim_opt(request.name);
+    let company = trim_opt(request.company);
+    let message = trim_opt(request.message);
+
+    sqlx::query(
+        r#"
+        INSERT INTO waitlist_entries (
+            id, kind, email, name, company, message, user_agent
+        )
+        VALUES ($1, 'teams_lead', $2, $3, $4, $5, $6)
+        "#,
+    )
+    .bind(id)
+    .bind(&email)
+    .bind(&name)
+    .bind(&company)
+    .bind(&message)
+    .bind(&user_agent)
+    .execute(&state.pool)
+    .await
+    .map_err(|err| {
+        tracing::error!(?err, "failed to insert teams lead");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    send_form_email(
+        &state,
+        "New Guildest teams demo request",
+        "New teams demo request",
+        vec![
+            ("Name", name.as_deref()),
+            ("Email", Some(email.as_str())),
+            ("Company", company.as_deref()),
+            ("Message", message.as_deref()),
+            ("User agent", user_agent.as_deref()),
+        ],
+        Some(email.as_str()),
+    )
+    .await
+    .map_err(|err| {
+        tracing::error!(?err, "failed to send teams lead email");
+        StatusCode::BAD_GATEWAY
+    })?;
+
+    Ok(Json(WaitlistSubmitResponse { ok: true, id }))
+}
+
+async fn public_subscribe_submit(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<SubscribeSubmitRequest>,
+) -> Result<Json<WaitlistSubmitResponse>, StatusCode> {
+    let email = request.email.trim().to_lowercase();
+    if !is_valid_email(&email) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let id = Uuid::new_v4();
+    let user_agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    sqlx::query(
+        r#"
+        INSERT INTO waitlist_entries (
+            id, kind, email, user_agent
+        )
+        VALUES ($1, 'subscribe', $2, $3)
+        "#,
+    )
+    .bind(id)
+    .bind(&email)
+    .bind(&user_agent)
+    .execute(&state.pool)
+    .await
+    .map_err(|err| {
+        tracing::error!(?err, "failed to insert subscriber");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    send_form_email(
+        &state,
+        "New Guildest subscriber",
+        "New subscriber",
+        vec![
+            ("Email", Some(email.as_str())),
+            ("User agent", user_agent.as_deref()),
+        ],
+        Some(email.as_str()),
+    )
+    .await
+    .map_err(|err| {
+        tracing::error!(?err, "failed to send subscriber email");
+        StatusCode::BAD_GATEWAY
+    })?;
+
+    Ok(Json(WaitlistSubmitResponse { ok: true, id }))
+}
+
+async fn send_form_email(
+    state: &AppState,
+    subject: &str,
+    heading: &str,
+    fields: Vec<(&str, Option<&str>)>,
+    reply_to: Option<&str>,
+) -> Result<()> {
+    let Some(api_key) = state.settings.resend_api_key.as_deref() else {
+        tracing::warn!("RESEND_API_KEY is not configured; skipping form email");
+        return Ok(());
+    };
+
+    if state.settings.guildest_email_to.is_empty() {
+        tracing::warn!("GUILDEST_EMAIL_TO is empty; skipping form email");
+        return Ok(());
+    }
+
+    let normalized_fields = fields
+        .into_iter()
+        .map(|(label, value)| (label, value.map(str::trim).filter(|v| !v.is_empty())))
+        .collect::<Vec<_>>();
+    let text = format_email_text(heading, &normalized_fields);
+    let html = format_email_html(heading, &normalized_fields);
+
+    let response = state
+        .http_client
+        .post(RESEND_EMAILS_URL)
+        .bearer_auth(api_key)
+        .json(&ResendEmailRequest {
+            from: state.settings.resend_from_email.clone(),
+            to: state.settings.guildest_email_to.clone(),
+            subject: subject.to_string(),
+            text,
+            html,
+            reply_to: reply_to
+                .map(str::trim)
+                .filter(|email| is_valid_email(email))
+                .map(str::to_string),
+        })
+        .send()
+        .await
+        .context("failed to call Resend")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!("Resend returned {status}: {body}");
+    }
+
+    Ok(())
+}
+
+fn format_email_text(heading: &str, fields: &[(&str, Option<&str>)]) -> String {
+    let mut lines = vec![
+        heading.to_string(),
+        String::new(),
+        "thank you so much: thanks111!!!!".to_string(),
+        "Seriously, I am glad you sent this in. Guildest is still being built by a real person, so every signup, note, and tiny bit of context means a lot.".to_string(),
+        String::new(),
+    ];
+    lines.extend(
+        fields
+            .iter()
+            .map(|(label, value)| format!("{label}: {}", value.unwrap_or("Not provided"))),
+    );
+    lines.join("\n")
+}
+
+fn format_email_html(heading: &str, fields: &[(&str, Option<&str>)]) -> String {
+    let rows = fields
+        .iter()
+        .map(|(label, value)| {
+            format!(
+                r#"<tr><td style="padding:8px 12px;color:#6b625f;font-size:13px;border-bottom:1px solid #eee;">{}</td><td style="padding:8px 12px;color:#211715;font-size:13px;border-bottom:1px solid #eee;white-space:pre-wrap;">{}</td></tr>"#,
+                escape_html(label),
+                escape_html(value.unwrap_or("Not provided")),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("");
+
+    format!(
+        r#"<div style="font-family:'Times New Roman',Times,serif;color:#211715;font-size:16px;line-height:1.5;"><h1 style="font-size:24px;line-height:1.25;font-weight:400;margin:0 0 18px;">{}</h1><p style="margin:0 0 10px;">thank you so much: thanks111!!!!</p><p style="margin:0 0 22px;">Seriously, I am glad you sent this in. Guildest is still being built by a real person, so every signup, note, and tiny bit of context means a lot.</p><table style="border-collapse:collapse;width:100%;max-width:680px;"><tbody>{rows}</tbody></table></div>"#,
+        escape_html(heading),
+    )
+}
+
+fn escape_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#039;")
+}
+
+fn is_valid_email(email: &str) -> bool {
+    let Some((local, domain)) = email.split_once('@') else {
+        return false;
+    };
+
+    !local.is_empty()
+        && domain.contains('.')
+        && !domain.starts_with('.')
+        && !domain.ends_with('.')
+        && !email.chars().any(char::is_whitespace)
+        && email.len() <= 320
+}
+
+async fn public_waitlist_export(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Response, StatusCode> {
+    let expected = std::env::var("GUILDEST_ADMIN_TOKEN").unwrap_or_default();
+    if expected.is_empty() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let provided = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .unwrap_or("");
+    if provided != expected {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        id: Uuid,
+        kind: String,
+        discord_user_id: Option<String>,
+        discord_username: Option<String>,
+        discord_display_name: Option<String>,
+        email: Option<String>,
+        name: Option<String>,
+        company: Option<String>,
+        source: Option<String>,
+        use_case: Option<String>,
+        message: Option<String>,
+        notes: Option<String>,
+        created_at: chrono::DateTime<chrono::Utc>,
+    }
+
+    let rows = sqlx::query_as::<_, Row>(
+        r#"
+        SELECT id, kind, discord_user_id, discord_username, discord_display_name,
+               email, name, company, source, use_case, message, notes, created_at
+        FROM waitlist_entries
+        ORDER BY created_at DESC
+        "#,
+    )
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|err| {
+        tracing::error!(?err, "failed to export waitlist");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    fn esc(s: &str) -> String {
+        let needs = s.contains(',') || s.contains('"') || s.contains('\n');
+        if needs {
+            format!("\"{}\"", s.replace('"', "\"\""))
+        } else {
+            s.to_string()
+        }
+    }
+
+    let mut csv = String::from(
+        "id,kind,created_at,discord_user_id,discord_username,discord_display_name,email,name,company,source,use_case,message,notes\n",
+    );
+    for r in rows {
+        csv.push_str(&format!(
+            "{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+            r.id,
+            esc(&r.kind),
+            r.created_at.to_rfc3339(),
+            esc(r.discord_user_id.as_deref().unwrap_or("")),
+            esc(r.discord_username.as_deref().unwrap_or("")),
+            esc(r.discord_display_name.as_deref().unwrap_or("")),
+            esc(r.email.as_deref().unwrap_or("")),
+            esc(r.name.as_deref().unwrap_or("")),
+            esc(r.company.as_deref().unwrap_or("")),
+            esc(r.source.as_deref().unwrap_or("")),
+            esc(r.use_case.as_deref().unwrap_or("")),
+            esc(r.message.as_deref().unwrap_or("")),
+            esc(r.notes.as_deref().unwrap_or("")),
+        ));
+    }
+
+    let mut response = csv.into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        "text/csv; charset=utf-8".parse().unwrap(),
+    );
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        "attachment; filename=\"waitlist.csv\"".parse().unwrap(),
+    );
+    Ok(response)
+}
+
 async fn start_login_oauth(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -809,6 +1274,51 @@ async fn public_stats(State(state): State<Arc<AppState>>) -> Result<Response, St
         [(
             header::CACHE_CONTROL,
             HeaderValue::from_static("no-store, max-age=0"),
+        )],
+        Json(response),
+    )
+        .into_response())
+}
+
+async fn public_message_heatmap(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<DaysQuery>,
+) -> Result<Response, StatusCode> {
+    let request_started = Instant::now();
+    let days = sanitize_heatmap_days(query.days);
+    let query_started = Instant::now();
+    let heatmap_result = fetch_message_heatmap_days(&state.pool, None, days).await;
+    observe_sql_query(
+        state.metrics,
+        "public_message_heatmap",
+        status_label(heatmap_result.as_ref().map(|_| &())),
+        query_started.elapsed().as_secs_f64(),
+    );
+    let (daily, window_start, window_end) =
+        heatmap_result.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let total_messages = daily.iter().map(|day| day.message_count).sum();
+
+    let response = PublicMessageHeatmapResponse {
+        days: daily,
+        days_requested: days,
+        scope: "all_guilds",
+        time_zone: "UTC",
+        total_messages,
+        window_end_utc: window_end.to_rfc3339(),
+        window_start_utc: window_start.to_rfc3339(),
+    };
+    observe_api_request(
+        state.metrics,
+        "public_message_heatmap",
+        StatusCode::OK,
+        request_started.elapsed().as_secs_f64(),
+        estimate_json_size(&response),
+    );
+
+    Ok((
+        [(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("public, max-age=60"),
         )],
         Json(response),
     )
@@ -1237,6 +1747,184 @@ async fn dashboard_guild_message_summary(
     );
 
     Ok(Json(response))
+}
+
+async fn dashboard_guild_message_heatmap(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(guild_id): Path<String>,
+    Query(query): Query<DaysQuery>,
+) -> Result<Json<DashboardMessageHeatmapResponse>, StatusCode> {
+    let request_started = Instant::now();
+    let session_id = read_session_id(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
+    ensure_guild_access(&state.pool, session_id, &guild_id).await?;
+
+    let days = sanitize_heatmap_days(query.days);
+    let query_started = Instant::now();
+    let heatmap_result = fetch_message_heatmap_days(&state.pool, Some(&guild_id), days).await;
+    observe_sql_query(
+        state.metrics,
+        "dashboard_guild_message_heatmap",
+        status_label(heatmap_result.as_ref().map(|_| &())),
+        query_started.elapsed().as_secs_f64(),
+    );
+    let (daily, window_start, window_end) =
+        heatmap_result.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let total_messages = daily.iter().map(|day| day.message_count).sum();
+
+    let response = DashboardMessageHeatmapResponse {
+        days: daily,
+        days_requested: days,
+        guild_id,
+        time_zone: "UTC",
+        total_messages,
+        window_end_utc: window_end.to_rfc3339(),
+        window_start_utc: window_start.to_rfc3339(),
+    };
+    observe_api_request(
+        state.metrics,
+        "dashboard_guild_message_heatmap",
+        StatusCode::OK,
+        request_started.elapsed().as_secs_f64(),
+        estimate_json_size(&response),
+    );
+
+    Ok(Json(response))
+}
+
+async fn fetch_message_heatmap_days(
+    pool: &PgPool,
+    guild_id: Option<&str>,
+    days: i32,
+) -> Result<
+    (
+        Vec<MessageSummaryDay>,
+        chrono::DateTime<Utc>,
+        chrono::DateTime<Utc>,
+    ),
+    sqlx::Error,
+> {
+    let today = Utc::now().date_naive();
+    let start_date = today - chrono::Duration::days((days - 1) as i64);
+    let window_start = start_date
+        .and_hms_opt(0, 0, 0)
+        .expect("UTC midnight must be valid")
+        .and_utc();
+    let window_end = today
+        .and_hms_opt(0, 0, 0)
+        .expect("UTC midnight must be valid")
+        .and_utc()
+        + chrono::Duration::days(1);
+
+    let rows = if let Some(guild_id) = guild_id {
+        sqlx::query_as::<_, MessageSummaryDayRow>(
+            r#"
+            WITH daily_activity AS (
+                SELECT
+                    activity_date AS day,
+                    SUM(messages)::BIGINT AS message_count,
+                    MAX(last_message_at) AS last_message_at
+                FROM guild_daily_activity
+                WHERE guild_id = $1
+                  AND activity_date >= DATE($2)
+                  AND activity_date < DATE($3)
+                GROUP BY activity_date
+            ),
+            indexed_messages AS (
+                SELECT
+                    (message.occurred_at AT TIME ZONE 'UTC')::DATE AS day,
+                    COUNT(*)::BIGINT AS message_count
+                FROM message_index AS message
+                LEFT JOIN guild_daily_activity AS daily
+                  ON daily.guild_id = message.guild_id
+                 AND daily.activity_date = (message.occurred_at AT TIME ZONE 'UTC')::DATE
+                WHERE message.guild_id = $1
+                  AND message.occurred_at >= $2
+                  AND message.occurred_at < $3
+                  AND (
+                    daily.last_message_at IS NULL
+                    OR message.occurred_at > daily.last_message_at
+                  )
+                GROUP BY day
+            )
+            SELECT
+                COALESCE(daily_activity.day, indexed_messages.day) AS day,
+                (
+                    COALESCE(daily_activity.message_count, 0)
+                    + COALESCE(indexed_messages.message_count, 0)
+                )::BIGINT AS message_count
+            FROM daily_activity
+            FULL OUTER JOIN indexed_messages
+              ON indexed_messages.day = daily_activity.day
+            ORDER BY day ASC
+            "#,
+        )
+        .bind(guild_id)
+        .bind(window_start)
+        .bind(window_end)
+        .fetch_all(pool)
+        .await?
+    } else {
+        sqlx::query_as::<_, MessageSummaryDayRow>(
+            r#"
+            WITH daily_activity AS (
+                SELECT
+                    activity_date AS day,
+                    SUM(messages)::BIGINT AS message_count
+                FROM guild_daily_activity
+                WHERE activity_date >= DATE($1)
+                  AND activity_date < DATE($2)
+                GROUP BY activity_date
+            ),
+            indexed_messages AS (
+                SELECT
+                    (message.occurred_at AT TIME ZONE 'UTC')::DATE AS day,
+                    COUNT(*)::BIGINT AS message_count
+                FROM message_index AS message
+                LEFT JOIN guild_daily_activity AS daily
+                  ON daily.guild_id = message.guild_id
+                 AND daily.activity_date = (message.occurred_at AT TIME ZONE 'UTC')::DATE
+                WHERE message.occurred_at >= $1
+                  AND message.occurred_at < $2
+                  AND (
+                    daily.last_message_at IS NULL
+                    OR message.occurred_at > daily.last_message_at
+                  )
+                GROUP BY day
+            )
+            SELECT
+                COALESCE(daily_activity.day, indexed_messages.day) AS day,
+                (
+                    COALESCE(daily_activity.message_count, 0)
+                    + COALESCE(indexed_messages.message_count, 0)
+                )::BIGINT AS message_count
+            FROM daily_activity
+            FULL OUTER JOIN indexed_messages
+              ON indexed_messages.day = daily_activity.day
+            ORDER BY day ASC
+            "#,
+        )
+        .bind(window_start)
+        .bind(window_end)
+        .fetch_all(pool)
+        .await?
+    };
+
+    let counts_by_day = rows
+        .into_iter()
+        .map(|row| (row.day, row.message_count))
+        .collect::<HashMap<_, _>>();
+    let daily = (0..days)
+        .map(|offset| {
+            let date = start_date + chrono::Duration::days(offset as i64);
+            MessageSummaryDay {
+                date: date.to_string(),
+                message_count: counts_by_day.get(&date).copied().unwrap_or(0),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    Ok((daily, window_start, window_end))
 }
 
 async fn dashboard_activation_funnel(
@@ -3821,6 +4509,52 @@ async fn ensure_public_schema(pool: &PgPool) -> Result<()> {
     .await
     .context("failed to alter dead_letter_discard_audit operator_reason")?;
 
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS waitlist_entries (
+            id UUID PRIMARY KEY,
+            kind TEXT NOT NULL,
+            discord_user_id TEXT NULL,
+            discord_username TEXT NULL,
+            discord_display_name TEXT NULL,
+            email TEXT NULL,
+            name TEXT NULL,
+            company TEXT NULL,
+            source TEXT NULL,
+            use_case TEXT NULL,
+            message TEXT NULL,
+            notes TEXT NULL,
+            ip TEXT NULL,
+            user_agent TEXT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("failed to create waitlist_entries")?;
+
+    sqlx::query(
+        r#"
+        CREATE INDEX IF NOT EXISTS waitlist_entries_kind_created_at_idx
+        ON waitlist_entries (kind, created_at DESC);
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("failed to create waitlist_entries index")?;
+
+    sqlx::query(
+        r#"
+        CREATE UNIQUE INDEX IF NOT EXISTS waitlist_entries_discord_user_id_idx
+        ON waitlist_entries (discord_user_id)
+        WHERE discord_user_id IS NOT NULL AND kind = 'waitlist';
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("failed to create waitlist_entries discord uniq index")?;
+
     Ok(())
 }
 
@@ -4904,7 +5638,11 @@ async fn dashboard_ai_settings_update(
     let session_id = read_session_id(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
     ensure_guild_access(&state.pool, session_id, &guild_id).await?;
 
-    match state.ai_store.upsert_guild_settings(&guild_id, &update).await {
+    match state
+        .ai_store
+        .upsert_guild_settings(&guild_id, &update)
+        .await
+    {
         Ok(settings) => Ok(Json(serde_json::to_value(settings).unwrap_or_default())),
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
@@ -4951,6 +5689,10 @@ fn read_session_id(headers: &HeaderMap) -> Option<Uuid> {
 
 fn sanitize_days(days: Option<i32>) -> i32 {
     days.unwrap_or(7).clamp(1, 90)
+}
+
+fn sanitize_heatmap_days(days: Option<i32>) -> i32 {
+    days.unwrap_or(365).clamp(1, 366)
 }
 
 #[derive(Clone, Copy)]

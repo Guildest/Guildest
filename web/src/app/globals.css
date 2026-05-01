@@ -20,6 +20,21 @@ body {
   color: var(--color-cream);
 }
 
+.dotted-grid {
+  background-image: radial-gradient(rgba(238, 234, 226, 0.06) 1px, transparent 1px);
+  background-size: 22px 22px;
+}
+
+.ascii-bg {
+  background-image:
+    radial-gradient(rgba(238, 234, 226, 0.04) 1px, transparent 1px),
+    linear-gradient(rgba(238, 234, 226, 0.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(238, 234, 226, 0.025) 1px, transparent 1px);
+  background-size: 18px 18px, 36px 36px, 36px 36px;
+  mask-image: radial-gradient(ellipse 90% 70% at 50% 50%, #000 30%, transparent 80%);
+  -webkit-mask-image: radial-gradient(ellipse 90% 70% at 50% 50%, #000 30%, transparent 80%);
+}
+
 /* Subtle noise texture on cards */
 .card {
   background: var(--color-surface);

@@ -24,6 +24,9 @@ pub struct Settings {
     pub ai_classify_model: String,
     pub ai_synthesis_model: String,
     pub discord_enable_message_content_intent: bool,
+    pub resend_api_key: Option<String>,
+    pub resend_from_email: String,
+    pub guildest_email_to: Vec<String>,
     pub rust_log: String,
 }
 
@@ -75,6 +78,15 @@ impl Settings {
             )
             .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
             .unwrap_or(false),
+            resend_api_key: env::var("RESEND_API_KEY").ok(),
+            resend_from_email: env::var("RESEND_FROM_EMAIL")
+                .unwrap_or_else(|_| "Guildest <onboarding@resend.dev>".to_string()),
+            guildest_email_to: env::var("GUILDEST_EMAIL_TO")
+                .unwrap_or_else(|_| "hi@guildest.com".to_string())
+                .split(',')
+                .map(|email| email.trim().to_string())
+                .filter(|email| !email.is_empty())
+                .collect(),
             rust_log: env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
         })
     }
