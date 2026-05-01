@@ -3,3 +3,4 @@
 /.env.backfill-lab
 /.backfill-lab
 .DS_Store
+*.pem

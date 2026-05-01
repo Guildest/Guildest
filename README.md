@@ -153,6 +153,61 @@ The Next.js API routes proxy form submissions and dashboard requests to that
 Rust API. Keep `RESEND_API_KEY`, `RESEND_FROM_EMAIL`, and `GUILDEST_EMAIL_TO`
 on the backend API host, not in Vercel.
 
+## API Deployment
+
+The production API deploy path is in
+[.github/workflows/deploy-api.yml](.github/workflows/deploy-api.yml). It builds
+the API Docker image in GitHub Actions, uploads the deployment bundle to S3, and
+uses SSM Run Command to update the EC2 host. The host runs the production compose
+stack in [infra/production](infra/production):
+
+- `api`: Rust API service
+- `postgres`: local Postgres data store
+- `redis`: local Valkey/Redis queue
+- `caddy`: HTTPS reverse proxy for `api.guildest.site`
+
+Provision a free-tier-sized EC2 host with:
+
+```bash
+AWS_REGION=us-east-1 \
+IAM_INSTANCE_PROFILE=guildest-api-ec2-profile \
+./scripts/provision-api-ec2.sh
+```
+
+The workflow expects these GitHub repository secrets:
+
+```text
+AWS_ACCESS_KEY_ID
+AWS_SECRET_ACCESS_KEY
+DISCORD_TOKEN
+DISCORD_APPLICATION_ID
+DISCORD_CLIENT_SECRET
+OPENROUTER_API_KEY
+RESEND_API_KEY
+RESEND_FROM_EMAIL
+GUILDEST_EMAIL_TO
+```
+
+And these GitHub repository variables:
+
+```text
+API_DOMAIN=api.guildest.site
+PUBLIC_API_BASE_URL=https://api.guildest.site
+PUBLIC_API_ALLOWED_ORIGIN=https://guildest.site
+PUBLIC_SITE_URL=https://guildest.site
+AI_CLASSIFY_MODEL=stepfun/step-3.5-flash
+AI_SYNTHESIS_MODEL=minimax/minimax-m2.7
+DISCORD_ENABLE_GUILD_MEMBERS_INTENT=false
+DISCORD_ENABLE_MESSAGE_CONTENT_INTENT=false
+RUST_LOG=info
+AWS_REGION=us-east-1
+AWS_DEPLOY_BUCKET=guildest-api-deploy-<account>-us-east-1
+AWS_INSTANCE_ID=i-...
+```
+
+Point `api.guildest.site` to the EC2 public IP with an `A` record. Caddy will
+issue the HTTPS certificate once DNS resolves to the instance.
+
 ## Running Services Manually
 
 If you want Postgres and Valkey in Docker but Rust services on your host:

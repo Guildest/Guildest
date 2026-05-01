@@ -1,0 +1,143 @@
+name: Deploy API
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/deploy-api.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "Dockerfile"
+      - "crates/**"
+      - "infra/production/**"
+
+concurrency:
+  group: deploy-api
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      API_DOMAIN: ${{ vars.API_DOMAIN }}
+      API_IMAGE: guildest-api:${{ github.sha }}
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      DEPLOY_DIR: /opt/guildest-api
+      S3_PREFIX: guildest-api/${{ github.sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Validate deployment config
+        run: |
+          test -n "${AWS_REGION}"
+          test -n "${{ vars.AWS_DEPLOY_BUCKET }}"
+          test -n "${{ vars.AWS_INSTANCE_ID }}"
+          test -n "${API_DOMAIN}"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Build API image
+        run: docker build --target api-runtime --tag "${API_IMAGE}" .
+
+      - name: Save API image
+        run: docker save "${API_IMAGE}" | gzip > guildest-api-image.tar.gz
+
+      - name: Write production env file
+        run: |
+          cat > api.env <<'EOF'
+          DISCORD_TOKEN=${{ secrets.DISCORD_TOKEN }}
+          DISCORD_APPLICATION_ID=${{ secrets.DISCORD_APPLICATION_ID }}
+          DISCORD_CLIENT_SECRET=${{ secrets.DISCORD_CLIENT_SECRET }}
+          DISCORD_API_BASE_URL=https://discord.com/api/v10
+          DISCORD_ENABLE_GUILD_MEMBERS_INTENT=${{ vars.DISCORD_ENABLE_GUILD_MEMBERS_INTENT }}
+          DISCORD_ENABLE_MESSAGE_CONTENT_INTENT=${{ vars.DISCORD_ENABLE_MESSAGE_CONTENT_INTENT }}
+          OPENROUTER_API_KEY=${{ secrets.OPENROUTER_API_KEY }}
+          AI_CLASSIFY_MODEL=${{ vars.AI_CLASSIFY_MODEL }}
+          AI_SYNTHESIS_MODEL=${{ vars.AI_SYNTHESIS_MODEL }}
+          PUBLIC_API_BASE_URL=${{ vars.PUBLIC_API_BASE_URL }}
+          PUBLIC_API_ALLOWED_ORIGIN=${{ vars.PUBLIC_API_ALLOWED_ORIGIN }}
+          PUBLIC_SITE_URL=${{ vars.PUBLIC_SITE_URL }}
+          RESEND_API_KEY=${{ secrets.RESEND_API_KEY }}
+          RESEND_FROM_EMAIL=${{ secrets.RESEND_FROM_EMAIL }}
+          GUILDEST_EMAIL_TO=${{ secrets.GUILDEST_EMAIL_TO }}
+          RUST_LOG=${{ vars.RUST_LOG }}
+          WORKER_BACKFILL_PAGE_DELAY_MS=25
+          WORKER_METRICS_BIND_ADDR=127.0.0.1:9091
+          WORKER_CONSUMER_PREFIX=guildest-worker
+          EOF
+
+      - name: Upload deployment bundle to S3
+        run: |
+          aws s3 cp guildest-api-image.tar.gz "s3://${{ vars.AWS_DEPLOY_BUCKET }}/${S3_PREFIX}/guildest-api-image.tar.gz"
+          aws s3 cp infra/production/api.compose.yml "s3://${{ vars.AWS_DEPLOY_BUCKET }}/${S3_PREFIX}/docker-compose.yml"
+          aws s3 cp infra/production/Caddyfile "s3://${{ vars.AWS_DEPLOY_BUCKET }}/${S3_PREFIX}/Caddyfile"
+          aws s3 cp api.env "s3://${{ vars.AWS_DEPLOY_BUCKET }}/${S3_PREFIX}/.env"
+
+      - name: Deploy through SSM
+        id: deploy
+        run: |
+          jq -n \
+            --arg bucket "${{ vars.AWS_DEPLOY_BUCKET }}" \
+            --arg prefix "${S3_PREFIX}" \
+            --arg api_image "${API_IMAGE}" \
+            --arg api_domain "${API_DOMAIN}" \
+            '{
+              commands: [
+                "set -euo pipefail",
+                "sudo mkdir -p /opt/guildest-api",
+                "sudo chown ec2-user:ec2-user /opt/guildest-api",
+                "cd /opt/guildest-api",
+                ("aws s3 cp s3://" + $bucket + "/" + $prefix + "/guildest-api-image.tar.gz ./guildest-api-image.tar.gz"),
+                ("aws s3 cp s3://" + $bucket + "/" + $prefix + "/docker-compose.yml ./docker-compose.yml"),
+                ("aws s3 cp s3://" + $bucket + "/" + $prefix + "/Caddyfile ./Caddyfile"),
+                ("aws s3 cp s3://" + $bucket + "/" + $prefix + "/.env ./.env"),
+                "docker load < guildest-api-image.tar.gz",
+                ("printf \"%s\\n\" \"API_IMAGE=" + $api_image + "\" \"API_DOMAIN=" + $api_domain + "\" > .deploy.env"),
+                "docker compose --env-file .deploy.env -f docker-compose.yml up -d --remove-orphans",
+                "docker image prune -f",
+                "curl --fail --show-error --silent http://127.0.0.1:8080/health"
+              ]
+            }' > ssm-parameters.json
+
+          COMMAND_ID="$(
+            aws ssm send-command \
+              --instance-ids "${{ vars.AWS_INSTANCE_ID }}" \
+              --document-name "AWS-RunShellScript" \
+              --comment "Deploy Guildest API ${{ github.sha }}" \
+              --parameters file://ssm-parameters.json \
+              --query "Command.CommandId" \
+              --output text
+          )"
+          echo "command_id=${COMMAND_ID}" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for deploy command
+        run: |
+          for attempt in $(seq 1 60); do
+            STATUS="$(
+              aws ssm get-command-invocation \
+                --command-id "${{ steps.deploy.outputs.command_id }}" \
+                --instance-id "${{ vars.AWS_INSTANCE_ID }}" \
+                --query "Status" \
+                --output text
+            )"
+            echo "SSM status: ${STATUS}"
+            case "${STATUS}" in
+              Success) exit 0 ;;
+              Failed|Cancelled|TimedOut|Cancelling) exit 1 ;;
+            esac
+            sleep 10
+          done
+          exit 1
+
+      - name: Clean deployment bundle from S3
+        if: always()
+        run: aws s3 rm "s3://${{ vars.AWS_DEPLOY_BUCKET }}/${S3_PREFIX}" --recursive
